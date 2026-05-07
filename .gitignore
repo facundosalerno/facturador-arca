@@ -1,9 +1,8 @@
 .env
-ta_cache.xml
-certs/
 __pycache__/
 *.pyc
 .venv/
 venv/
 cache/
 .DS_Store
+output/
