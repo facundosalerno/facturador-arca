@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import base64
 import random
-import requests
 from logging import Logger
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -17,6 +16,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.serialization import pkcs7
 from cryptography.x509 import load_pem_x509_certificate
 
+from src.client.session import AfipSession
 from src.const import Mode
 
 WSAA_URLS = {
@@ -50,12 +50,16 @@ class Wsaa:
         mode: Mode,
         cert_path: Path,
         private_key_path: Path,
-        log: Logger
+        cache_path: Path,
+        log: Logger,
+        session: AfipSession,
     ) -> None:
         self.mode = mode
         self.cert_path = cert_path
         self.private_key_path = private_key_path
+        self.cache_path = cache_path
         self.log = log
+        self.session = session
 
 
     def get_certificate_info(self) -> CertificateInfo:
@@ -68,21 +72,18 @@ class Wsaa:
             not_valid_after=cert.not_valid_after_utc,
         )
 
-    def get_ticket_access(
-        self,
-        service: str,
-        ta_path: Path | None = None,
-    ) -> TicketAccess:
-        if ta_path:
-            cached = self._load_cached_ta(ta_path)
-            if cached:
-                return cached
+    def get_ticket_access(self, service: str) -> TicketAccess:
+        
+        ta_path = self.cache_path / f"ta_{service}_{self.mode.value}.xml"
+        cached = self._load_cached_ta(ta_path)
+        if cached:
+            return cached
 
         payload = self._build_login_ticket_request(service)
         cms_b64 = self._sign_cms(payload)
         envelope = self._login_cms_soap_envelope(cms_b64)
 
-        response = requests.post(
+        response = self.session.post(
             WSAA_URLS[self.mode],
             data=envelope.encode("utf-8"),
             headers={
@@ -101,6 +102,7 @@ class Wsaa:
 
         if ta_path:
             # Guardamos la respuesta cruda; al releerla parseamos y validamos vigencia.
+            ta_path.parent.mkdir(parents=True, exist_ok=True)
             ta_path.write_text(response.text, encoding="utf-8")
 
         return self._parse_login_response(response.text)

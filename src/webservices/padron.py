@@ -9,8 +9,7 @@ from logging import Logger
 from dataclasses import dataclass
 from xml.etree import ElementTree as ET
 
-import requests
-
+from src.client.session import AfipSession
 from src.const import Mode
 from src.auth.wsaa import TicketAccess
 from src.webservices.wsfe import IVACondicion
@@ -37,11 +36,13 @@ class Padron:
         self,
         mode: Mode,
         ta: TicketAccess,
-        log: Logger
+        log: Logger,
+        session: AfipSession,
     ) -> None:
         self.mode = mode
         self.ta = ta
         self.log = log
+        self.session = session
 
     def get_persona(self, cuit_representada: str, cuit_consulta: str) -> PersonaInfo:
         envelope = (
@@ -59,7 +60,7 @@ class Padron:
             "</soapenv:Body>"
             "</soapenv:Envelope>"
         )
-        resp = requests.post(
+        resp = self.session.post(
             PADRON_URLS[self.mode],
             data=envelope.encode("utf-8"),
             headers={"Content-Type": "text/xml; charset=utf-8", "SOAPAction": ""},

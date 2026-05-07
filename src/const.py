@@ -24,6 +24,21 @@ class CbteTipo(IntEnum):
         return letters[value.upper()]
 
 
+class EmisionTipo(StrEnum):
+    CAE  = "CAE"   # autorización online al momento de emitir
+    CAEA = "CAEA"  # autorización anticipada (batch, sin conexión al momento de emitir)
+
+    @classmethod
+    def from_raw(cls, value: str) -> EmisionTipo:
+        # AFIP devuelve strings descriptivos como "CAE - Ri Iva", "CAEA - Ri Iva", etc.
+        # Solo nos interesa el prefijo para determinar el tipo.
+        if value.startswith("CAEA"):
+            return cls.CAEA
+        if value.startswith("CAE"):
+            return cls.CAE
+        raise ValueError(f"EmisionTipo desconocido: {value!r}")
+
+
 class Concepto(IntEnum):
     PRODUCTOS = 1
     SERVICIOS = 2

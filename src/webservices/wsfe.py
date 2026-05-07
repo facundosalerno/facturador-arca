@@ -10,10 +10,9 @@ from dataclasses import dataclass, field
 from datetime import date
 from xml.etree import ElementTree as ET
 
-import requests
-
 from src.auth.wsaa import TicketAccess
-from src.const import CbteTipo, Concepto, DocTipo, AlicuotaIVAId, IVACondicion, FacturaResultado, Mode
+from src.client.session import AfipSession
+from src.const import CbteTipo, EmisionTipo, Concepto, DocTipo, AlicuotaIVAId, IVACondicion, FacturaResultado, Mode
 
 SERVICE_ID = "wsfe"
 
@@ -41,7 +40,7 @@ class PingResult:
 @dataclass
 class PtoVta:
     nro: int
-    emision_tipo: CbteTipo
+    emision_tipo: EmisionTipo
     bloqueado: str
     fch_baja: str
 
@@ -71,7 +70,7 @@ class CAEResultado:
 
 @dataclass
 class Comprobante:
-    pto_vta: int
+    pto_vta_nro: int
     cbte_tipo: CbteTipo
     cbte_nro: int
 
@@ -80,11 +79,13 @@ class Wsfe:
         self,
         mode: Mode,
         ta: TicketAccess,
-        log: Logger
+        log: Logger,
+        session: AfipSession,
     ) -> None:
         self.mode = mode
         self.ta = ta
         self.log = log
+        self.session = session
 
 
     def ping(self) -> PingResult:
@@ -132,7 +133,7 @@ class Wsfe:
         return [
             PtoVta(
                 nro = int(pv.findtext("ar:Nro", "", NS)),
-                emision_tipo = CbteTipo(pv.findtext("ar:EmisionTipo", "", NS)), # TODO esto no estoy seguro que devuelve
+                emision_tipo = EmisionTipo.from_raw(pv.findtext("ar:EmisionTipo", "", NS)),
                 bloqueado = pv.findtext("ar:Bloqueado", "", NS),
                 fch_baja = pv.findtext("ar:FchBaja", "", NS),
             )
@@ -251,7 +252,7 @@ class Wsfe:
             raise RuntimeError("error FECompUltimoAutorizado: " + "; ".join(errors))
 
         return Comprobante(
-            pto_vta = int(result.findtext("ar:PtoVta", "", NS)),
+            pto_vta_nro = int(result.findtext("ar:PtoVta", "", NS)),
             cbte_tipo = CbteTipo(int(result.findtext("ar:CbteTipo", "", NS))),
             cbte_nro = int(result.findtext("ar:CbteNro", "", NS)),
         )
@@ -265,7 +266,7 @@ class Wsfe:
             f"<soapenv:Body>{body_xml}</soapenv:Body>"
             "</soapenv:Envelope>"
         )
-        response = requests.post(
+        response = self.session.post(
             WSFE_URLS[self.mode],
             data=envelope.encode("utf-8"),
             headers={
