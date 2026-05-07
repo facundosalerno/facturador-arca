@@ -10,8 +10,8 @@ from src.const import Mode
 from src.utils import ensure_input, ask, print_obj
 from src.log import create_logger
 from src.auth.wsaa import Wsaa
-from src.pdf import generate_invoice_pdf
-from src.const import CbteTipo, IVACondicion, AlicuotaIVAId
+from src.pdf import generate_invoice_pdf, ItemFactura, UnidadMedida
+from src.const import CbteTipo, IVACondicion
 from src.webservices.padron import SERVICE_ID as PADRON_SERVICE_ID, Padron, PersonaInfo
 from src.webservices.wsfe import SERVICE_ID as WSFE_SERVICE_ID, Wsfe, SolicitudFactura, PtoVta
 
@@ -123,7 +123,14 @@ def main():
         output_path = pdf_path,
         emisor = emisor,
         receptor = receptor,
-        logo_path = logo_path
+        logo_path = logo_path,
+        items = [ItemFactura(
+            descripcion="50 Licencias",
+            cantidad=1.0,
+            precio_unitario=req.imp_neto,
+            unidad_medida=UnidadMedida.UNIDADES,
+            codigo = "1",
+        )]
     )
     log.info(f"Factura electronica generada exitosamente en {pdf_path}")
 

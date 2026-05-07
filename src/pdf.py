@@ -66,7 +66,7 @@ class UnidadMedida(str, Enum):
 
 
 @dataclass
-class InvoiceItem:
+class ItemFactura:
     descripcion: str
     cantidad: float = 1.0
     precio_unitario: float = 0.0
@@ -127,8 +127,8 @@ def generate_invoice_pdf(
     emisor: PersonaInfo,
     receptor: PersonaInfo,
     logo_path: Path,
+    items: Optional[list[ItemFactura]],
     condicion_venta: CondicionVenta = CondicionVenta.TRANSFERENCIA_BANCARIA,
-    items: Optional[list[InvoiceItem]] = None,
     otros_tributos: float = 0.0,
 ) -> None:
     margin   = 20 * mm
@@ -152,8 +152,8 @@ def generate_invoice_pdf(
     imp_total = round(req.imp_neto + imp_iva + otros_tributos, 2)
 
     # Si no se pasan items, construir uno desde imp_neto
-    if items is None:
-        items = [InvoiceItem(
+    if not items:
+        items = [ItemFactura(
             descripcion="Servicios profesionales",
             cantidad=1.0,
             precio_unitario=req.imp_neto,
@@ -370,11 +370,13 @@ def generate_invoice_pdf(
     tot_bv = ps("tot_bv", fontSize=10, fontName="Helvetica-Bold", textColor=colors.white,
                 alignment=TA_RIGHT, leading=14)
 
-    # Desglose IVA por alícuota — mostrar todas, 0 si no aplica
+    # Desglose IVA por alícuota — mostrar solo las que aplican (> 0)
     iva_rates = [27.0, 21.0, 10.5, 5.0, 2.5, 0.0]
     iva_rows = []
     for rate in iva_rates:
         amount = round(req.imp_neto * rate / 100, 2) if rate == req.iva else 0.0
+        if amount <= 0:
+            continue
         iva_rows.append([
             _p(f"IVA {rate:.1f}%:" if rate != int(rate) else f"IVA {rate:.0f}%:", tot_l),
             _p(f"$ {amount:,.2f}", tot_v),
