@@ -4,6 +4,7 @@ WSFEv1 - WebService de Facturacion Electronica
 
 from __future__ import annotations
 
+from itertools import groupby
 from typing import Any, Dict, List
 from logging import Logger
 from dataclasses import dataclass, field
@@ -81,11 +82,13 @@ class Wsfe:
         ta: TicketAccess,
         log: Logger,
         session: AfipSession,
+        batch_size: int = 10,
     ) -> None:
         self.mode = mode
         self.ta = ta
         self.log = log
         self.session = session
+        self.batch_size = batch_size
 
 
     def ping(self) -> PingResult:
@@ -140,32 +143,17 @@ class Wsfe:
             for pv in result.findall("ar:ResultGet/ar:PtoVenta", NS)
         ]
 
-    def cae_solicitar(self, cuit: str, req: SolicitudFactura) -> CAEResultado:
+    def _build_det_request(self, req: SolicitudFactura) -> str:
+        fmt = "%Y%m%d"
         aliciva_id = AlicuotaIVAId.from_pct(req.iva)
         imp_iva = round(req.imp_neto * req.iva / 100, 2)
         imp_total = round(req.imp_neto + imp_iva, 2)
-        fmt = "%Y%m%d"
-
         serv_fields = (
             f"<ar:FchServDesde>{req.serv_desde.strftime(fmt)}</ar:FchServDesde>"
             f"<ar:FchServHasta>{req.serv_hasta.strftime(fmt)}</ar:FchServHasta>"
             f"<ar:FchVtoPago>{req.vto_pago.strftime(fmt)}</ar:FchVtoPago>"
         ) if req.concepto in (Concepto.SERVICIOS, Concepto.PRODUCTOS_Y_SERVICIOS) else ""
-
-        body = (
-            "<ar:FECAESolicitar>"
-            "<ar:Auth>"
-            f"<ar:Token>{self.ta.token}</ar:Token>"
-            f"<ar:Sign>{self.ta.sign}</ar:Sign>"
-            f"<ar:Cuit>{cuit}</ar:Cuit>"
-            "</ar:Auth>"
-            "<ar:FeCAEReq>"
-            "<ar:FeCabReq>"
-            "<ar:CantReg>1</ar:CantReg>"
-            f"<ar:PtoVta>{req.pto_vta.nro}</ar:PtoVta>"
-            f"<ar:CbteTipo>{req.cbte_tipo}</ar:CbteTipo>"
-            "</ar:FeCabReq>"
-            "<ar:FeDetReq>"
+        return (
             "<ar:FECAEDetRequest>"
             f"<ar:Concepto>{req.concepto}</ar:Concepto>"
             f"<ar:DocTipo>{DocTipo.CUIT}</ar:DocTipo>"
@@ -191,15 +179,30 @@ class Wsfe:
             "</ar:AlicIva>"
             "</ar:Iva>"
             "</ar:FECAEDetRequest>"
+        )
+
+    def _cae_solicitar_batch(self, cuit: str, reqs: list[SolicitudFactura]) -> list[CAEResultado]:
+        first = reqs[0]
+        body = (
+            "<ar:FECAESolicitar>"
+            "<ar:Auth>"
+            f"<ar:Token>{self.ta.token}</ar:Token>"
+            f"<ar:Sign>{self.ta.sign}</ar:Sign>"
+            f"<ar:Cuit>{cuit}</ar:Cuit>"
+            "</ar:Auth>"
+            "<ar:FeCAEReq>"
+            "<ar:FeCabReq>"
+            f"<ar:CantReg>{len(reqs)}</ar:CantReg>"
+            f"<ar:PtoVta>{first.pto_vta.nro}</ar:PtoVta>"
+            f"<ar:CbteTipo>{first.cbte_tipo}</ar:CbteTipo>"
+            "</ar:FeCabReq>"
+            "<ar:FeDetReq>"
+            + "".join(self._build_det_request(r) for r in reqs) +
             "</ar:FeDetReq>"
             "</ar:FeCAEReq>"
             "</ar:FECAESolicitar>"
         )
         root = self._post_soap("FECAESolicitar", body)
-        det = root.find(".//ar:FECAEDetResponse", NS)
-        if det is None:
-            fault = root.find(".//soap:Fault", NS)
-            raise RuntimeError(f"error FECAESolicitar no devolvio detalles: {ET.tostring(fault, encoding='unicode') if fault is not None else 'unknown'}")
 
         errors = [
             f"{e.findtext('ar:Code', '', NS)}: {e.findtext('ar:Msg', '', NS)}"
@@ -208,21 +211,47 @@ class Wsfe:
         if errors:
             raise RuntimeError("error FECAESolicitar: " + "; ".join(errors))
 
-        resultado = det.findtext("ar:Resultado", "", NS)
-        observations = [
-            f"{o.findtext('ar:Code', '', NS)}: {o.findtext('ar:Msg', '', NS)}"
-            for o in det.findall("ar:Observaciones/ar:Obs", NS)
-        ]
-        if resultado == FacturaResultado.RECHAZADO:
-            raise RuntimeError("factura rechazada: " + ("; ".join(observations) or "none"))
+        dets = root.findall(".//ar:FECAEDetResponse", NS)
+        if not dets:
+            fault = root.find(".//soap:Fault", NS)
+            raise RuntimeError(f"error FECAESolicitar no devolvio detalles: {ET.tostring(fault, encoding='unicode') if fault is not None else 'unknown'}")
 
-        return CAEResultado(
-            cbte_nro=int(det.findtext("ar:CbteDesde", "0", NS)),
-            resultado=FacturaResultado(resultado),
-            cae=det.findtext("ar:CAE", "", NS),
-            cae_fch_vto=det.findtext("ar:CAEFchVto", "", NS),
-            observations=observations,
-        )
+        results = []
+        for det in dets:
+            resultado = det.findtext("ar:Resultado", "", NS)
+            observations = [
+                f"{o.findtext('ar:Code', '', NS)}: {o.findtext('ar:Msg', '', NS)}"
+                for o in det.findall("ar:Observaciones/ar:Obs", NS)
+            ]
+            if resultado == FacturaResultado.RECHAZADO:
+                cbte = det.findtext("ar:CbteDesde", "?", NS)
+                raise RuntimeError(f"factura {cbte} rechazada: " + ("; ".join(observations) or "none"))
+            results.append(CAEResultado(
+                cbte_nro=int(det.findtext("ar:CbteDesde", "0", NS)),
+                resultado=FacturaResultado(resultado),
+                cae=det.findtext("ar:CAE", "", NS),
+                cae_fch_vto=det.findtext("ar:CAEFchVto", "", NS),
+                observations=observations,
+            ))
+        return results
+
+    def cae_solicitar(self, cuit: str, reqs: List[SolicitudFactura]) -> Dict[int, CAEResultado]:
+        results: Dict[int, CAEResultado] = {}
+        key_fn = lambda r: (r.pto_vta.nro, r.cbte_tipo)
+        # El header de cada batch requiere un único pto_vta y cbte_tipo, por lo que hay que
+        # agrupar por esos campos antes de batchar. El sort previo es necesario porque
+        # groupby solo agrupa elementos consecutivos con la misma clave.
+        for _, group in groupby(sorted(reqs, key=key_fn), key=key_fn):
+            group_list = list(group)
+            for i in range(0, len(group_list), self.batch_size):
+                chunk = group_list[i:i + self.batch_size]
+                duplicates = [r.cbte_nro for r in chunk if r.cbte_nro in results]
+                if duplicates:
+                    raise ValueError(f"cbte_nro duplicado en la solicitud: {duplicates}")
+                self.log.debug(f"Enviando batch de {len(chunk)} comprobante(s) (pto_vta={chunk[0].pto_vta.nro}, cbte_tipo={chunk[0].cbte_tipo})")
+                for resultado in self._cae_solicitar_batch(cuit, chunk):
+                    results[resultado.cbte_nro] = resultado
+        return results
 
 
     def ultimo_cbte_autorizado(self, cuit: str, pto_vta: PtoVta, cbte_tipo: CbteTipo) -> Comprobante:

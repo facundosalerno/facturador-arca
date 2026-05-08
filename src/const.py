@@ -73,6 +73,13 @@ class IVACondicion(IntEnum):
     CONSUMIDOR_FINAL = 5
     MONOTRIBUTISTA = 6
 
+    @classmethod
+    def from_str(cls, value: str) -> IVACondicion:
+        letters = {"RI": cls.RESPONSABLE_INSCRIPTO, "E": cls.EXENTO, "CF": cls.CONSUMIDOR_FINAL, "M": cls.MONOTRIBUTISTA}
+        if not value.upper() in letters:
+            raise ValueError(f"Unsupported cbte type: {value}. Supported: {list(letters)}")
+        return letters[value.upper()]
+
 
 class FacturaResultado(str):
     APROBADO = "A"
