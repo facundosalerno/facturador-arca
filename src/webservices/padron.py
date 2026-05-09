@@ -38,11 +38,13 @@ class Padron:
         ta: TicketAccess,
         log: Logger,
         session: AfipSession,
+        batch_size: int = 50,
     ) -> None:
         self.mode = mode
         self.ta = ta
         self.log = log
         self.session = session
+        self.batch_size = batch_size
 
     def get_persona(self, cuit_representada: str, cuit_consulta: str) -> PersonaInfo:
         envelope = (
@@ -85,11 +87,76 @@ class Padron:
             desc = err.findtext("descripcion") or ET.tostring(err, encoding="unicode")
             raise RuntimeError(f"Padron error para CUIT {cuit_consulta}: {desc}")
 
-        dg = root.find(".//datosGenerales")
+        persona_return = root.find(".//personaReturn") or root
+        return self._parse_persona_return(persona_return, cuit_consulta)
+
+    def get_personas(self, cuit_representada: str, cuits_consulta: list[str]) -> dict[str, PersonaInfo]:
+        results: dict[str, PersonaInfo] = {}
+        for i in range(0, len(cuits_consulta), self.batch_size):
+            chunk = cuits_consulta[i:i + self.batch_size]
+            self.log.debug(f"Consultando padron batch de {len(chunk)} persona(s)")
+            results.update(self._get_personas_batch(cuit_representada, chunk))
+        return results
+
+    def _get_personas_batch(self, cuit_representada: str, cuits_consulta: list[str]) -> dict[str, PersonaInfo]:
+        ids_xml = "".join(f"<idPersona>{c}</idPersona>" for c in cuits_consulta)
+        envelope = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
+            'xmlns:a5="http://a5.soap.ws.server.puc.sr/">'
+            "<soapenv:Header/>"
+            "<soapenv:Body>"
+            "<a5:getPersonaList_v2>"
+            f"<token>{self.ta.token}</token>"
+            f"<sign>{self.ta.sign}</sign>"
+            f"<cuitRepresentada>{cuit_representada}</cuitRepresentada>"
+            f"{ids_xml}"
+            "</a5:getPersonaList_v2>"
+            "</soapenv:Body>"
+            "</soapenv:Envelope>"
+        )
+        resp = self.session.post(
+            PADRON_URLS[self.mode],
+            data=envelope.encode("utf-8"),
+            headers={"Content-Type": "text/xml; charset=utf-8", "SOAPAction": ""},
+            timeout=30,
+        )
+        if resp.status_code >= 400:
+            try:
+                fault = next(
+                    (el.text for el in ET.fromstring(resp.text).iter()
+                    if el.tag.endswith("faultstring") and el.text),
+                    None,
+                )
+            except ET.ParseError:
+                fault = None
+            raise RuntimeError(
+                f"Padron HTTP {resp.status_code}: {fault or resp.text[:800]}"
+            )
+        root = ET.fromstring(resp.text)
+
+        by_cuit: dict[str, PersonaInfo] = {}
+        for persona_return in root.findall(".//personaReturn"):
+            err = persona_return.find("errorConstancia")
+            if err is not None:
+                cuit = persona_return.findtext("idPersona") or "desconocido"
+                desc = err.findtext("descripcion") or ET.tostring(err, encoding="unicode")
+                raise RuntimeError(f"Padron error para CUIT {cuit}: {desc}")
+            dg = persona_return.find("datosGenerales")
+            if dg is None:
+                raise RuntimeError(
+                    f"Sin datosGenerales en padron:\n{ET.tostring(persona_return, encoding='unicode')}"
+                )
+            cuit = dg.findtext("idPersona") or ""
+            by_cuit[cuit] = self._parse_persona_return(persona_return, cuit)
+        return by_cuit
+
+    def _parse_persona_return(self, persona_return: ET.Element, cuit: str) -> PersonaInfo:
+        dg = persona_return.find("datosGenerales")
         if dg is None:
             raise RuntimeError(
-                f"Sin datosGenerales en padron para CUIT {cuit_consulta}:\n"
-                f"{ET.tostring(root, encoding='unicode')}"
+                f"Sin datosGenerales en padron para CUIT {cuit}:\n"
+                f"{ET.tostring(persona_return, encoding='unicode')}"
             )
 
         tipo = (dg.findtext("tipoPersona") or "").upper()
@@ -97,7 +164,6 @@ class Padron:
         nombre = dg.findtext("nombre") or ""
         razon_social = f"{nombre} {apellido}".strip() if tipo == "FISICA" else apellido
 
-        persona_return = root.find(".//personaReturn") or root
         drg = persona_return.find("datosRegimenGeneral")
         dmt = persona_return.find("datosMonotributo")
 
@@ -109,7 +175,7 @@ class Padron:
             raise Exception("no se puede determinar la condicion frente al IVA")
 
         return PersonaInfo(
-            cuit=cuit_consulta,
+            cuit=cuit,
             razon_social=razon_social,
             domicilio=self._fmt_domicilio(dg.find("domicilioFiscal")),
             condicion_iva=condicion_iva,

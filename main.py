@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import calendar
 import os
-import threading
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
 from logging import Logger
@@ -21,24 +21,10 @@ from src.ui import FacturadorApp
 
 
 def ver_clientes(app: FacturadorApp, log: Logger) -> None:
+    log.debug("Leyendo excel de clientes")
     path = os.environ["EXCEL_CLIENTES"]
     clientes = read_clientes(Path(path).expanduser())
     log.info(f"{len(clientes)} clientes leidos del Excel {path}")
-
-    back_to_menu = threading.Event()
-
-    def on_open():
-        app.toggle_log(show=False)
-
-    def on_close():
-        app.toggle_log(show=True)
-        if back_to_menu.is_set():
-            app.toggle_confirm_bar(show=True)
-
-    def on_link():
-        app.toggle_log(show=False)
-        if back_to_menu.is_set():
-            app.toggle_confirm_bar(show=False)
 
     app.show_table_sync(
         label="Tabla de clientes",
@@ -64,19 +50,47 @@ def ver_clientes(app: FacturadorApp, log: Logger) -> None:
                     item.detalle or "-",
                     str(item.colaboradores),
                     f"${item.imp_neto:,.2f}",
-                    f"{item.bonificacion_pct:.1f}%",
+                    f"{c.bonificacion_pct:.1f}%",
                 )
                 for item in c.items
             ] if len(c.items) > 1 else []
             for c in clientes
         ],
-        on_open=on_open,
-        on_close=on_close,
-        on_link=on_link
     )
-    back_to_menu.set()
     app.ask_sync("", yes_label="Volver al menu", no_label=None)
-    app.call_from_thread(app.toggle_table, show=False)
+
+
+def validar_pdf(app: FacturadorApp, log: Logger) -> None:
+    from pyhanko.sign.validation import validate_pdf_signature
+    from pyhanko.pdf_utils.reader import PdfFileReader
+
+    def parse_path(s: str) -> Path:
+        p = Path(s).expanduser()
+        if not p.exists():
+            raise FileNotFoundError(p)
+        return p
+
+    path = app.input_sync(prompt="Ruta del PDF a validar: ", type=Path, parser=parse_path)
+    log.info(f"Validando: {path}")
+
+    try:
+        with open(path, "rb") as f:
+            reader = PdfFileReader(f)
+            sigs = reader.embedded_signatures
+            if not sigs:
+                log.warning("El PDF no contiene firmas digitales")
+            else:
+                for i, sig in enumerate(sigs, 1):
+                    status = validate_pdf_signature(sig)
+                    log.info(f"Firma #{i} — campo: {sig.field_name}")
+                    log.info(f"  Sin modificaciones: {'OK' if status.intact else 'FALLO'}")
+                    log.info(f"  Firma válida:       {'OK' if status.valid else 'FALLO'}")
+                    if status.signing_cert is not None:
+                        log.info(f"  Firmante: {status.signing_cert.subject.human_friendly}")
+    except Exception as e:
+        log.error(f"Error al validar: {e}")
+
+    app.ask_sync("", yes_label="Volver al menu", no_label=None)
 
 
 def ver_facturas(app: FacturadorApp, log: Logger) -> None:
@@ -84,23 +98,24 @@ def ver_facturas(app: FacturadorApp, log: Logger) -> None:
     app.ask_sync("", yes_label="Volver al menu", no_label=None)
 
 
-def generar_facturas(app: FacturadorApp, log) -> None:
+def generar_facturas(app: FacturadorApp, log: Logger) -> None:
     mode = Mode(os.environ["ARCA_ENV"])
-    cuit = os.environ["ARCA_CUIT"]
+    #cuit = os.environ["ARCA_CUIT"]
 
     emisor = PersonaInfo(
-        cuit = cuit,
-        razon_social = "TU_RAZON_SOCIAL",
-        domicilio = "TU_DOMICILIO_FISCAL",
-        condicion_iva = IVACondicion.RESPONSABLE_INSCRIPTO,
-        fecha_inicio_actividades = date(2022, 7, 20),
-        ingresos_brutos = cuit
+        cuit = os.environ["ARCA_CUIT"],
+        razon_social = os.environ["ARCA_RAZON_SOCIAL"],
+        domicilio = os.environ["ARCA_RAZON_DOMICILIO"],
+        condicion_iva = IVACondicion.from_str(os.environ["ARCA_CONDICION_IVA"]),
+        fecha_inicio_actividades = datetime.strptime(os.environ["ARCA_FECHA_INICIO_ACTIVIDADES"], "%d/%m/%Y").date(),
+        ingresos_brutos = os.environ["ARCA_CUIT"]
     )
 
     # TODO esto deberia manejarse de otra forma
-    receptor_cuit= os.environ["ARCA_RECEPTOR_CUIT"]
-    imp_neto = float(os.environ.get("ARCA_IMP_NETO", "100.00"))
-    iva = float(os.environ.get("ARCA_IVA", "21.0"))
+    #receptor_cuit= os.environ["ARCA_RECEPTOR_CUIT"]
+    #imp_neto = float(os.environ.get("ARCA_IMP_NETO", "100.00"))
+    #iva = float(os.environ.get("ARCA_IVA", "21.0"))
+    #cbte_tipo = CbteTipo.from_str(os.environ["ARCA_CBTE_TIPO"])
 
     log.info(f"Ambiente: {mode}")
 
@@ -118,13 +133,22 @@ def generar_facturas(app: FacturadorApp, log) -> None:
 
     cert = auth.get_certificate_info()
 
+    assert emisor.fecha_inicio_actividades
+
     mode_color = "yellow" if mode == Mode.HOMOLOGACION else "bold red"
     proceed = app.ask_sync((
         f"[bold]Ambiente:[/bold] [{mode_color}]{mode.value.upper()}[/]\n\n"
+        f"[bold]Representando a:[/bold]\n"
+        f"{emisor.razon_social}\n"
+        f"{emisor.cuit}\n"
+        f"{emisor.condicion_iva.name.replace('_', ' ')}\n"
+        f"{emisor.domicilio}\n"
+        f"Ingresos Brutos: {emisor.ingresos_brutos}\n"
+        f"Fecha de Inicio de Actividades: {emisor.fecha_inicio_actividades.strftime('%d %B %Y')}\n\n"
         f"[bold]Certificado:[/bold]\n"
-        f"  Subject:  {cert.subject}\n"
-        f"  Issuer:   {cert.issuer}\n"
-        f"  Vigencia: {cert.not_valid_before.date()} \u2192 {cert.not_valid_after.date()}"
+        f"Subject:  {cert.subject}\n"
+        f"Issuer:   {cert.issuer}\n"
+        f"Vigencia: {cert.not_valid_before.date()} \u2192 {cert.not_valid_after.date()}"
     ))
     if not proceed:
         app.exit()
@@ -135,8 +159,6 @@ def generar_facturas(app: FacturadorApp, log) -> None:
     log.debug(f"Ticket de acceso WSFE obtenido (expira: {ta_wsfe.expiration.isoformat()})")
 
     fe = Wsfe(mode=mode, ta=ta_wsfe, log=log, session=session)
-
-    cbte_tipo = CbteTipo.from_str(os.environ["ARCA_CBTE_TIPO"])
 
     if mode == Mode.HOMOLOGACION:
         nro = app.input_sync(prompt="En homologacion debe seleccionar el punto de venta manualmente: ", type=int, parser=int)
@@ -149,15 +171,11 @@ def generar_facturas(app: FacturadorApp, log) -> None:
         pto_vta = next((pv for pv in ptos if pv.nro == nro), None)
         assert pto_vta, "el punto de venta seleccionado no existe"
 
-    log.debug(f"Consultando el ultimo comprobante autorizado (pto_vta={pto_vta.nro}, cbte_tipo={cbte_tipo})")
-    ultimo_cbt = fe.ultimo_cbte_autorizado(emisor.cuit, pto_vta=pto_vta, cbte_tipo=cbte_tipo)
-    proximo_cbt_nro = ultimo_cbt.cbte_nro + 1
-    log.debug(f"Ultimo comprobante: {ultimo_cbt.cbte_nro} -> proximo: {proximo_cbt_nro}")
-
-    
     log.debug("Leyendo excel de clientes")
+    path = os.environ["EXCEL_CLIENTES"]
     clientes = read_clientes(Path(os.environ["EXCEL_CLIENTES"]).expanduser())
-    log.info(f"{len(clientes)} clientes leídos del Excel")
+    log.info(f"{len(clientes)} clientes leidos del Excel {path}")
+
     app.show_table_sync(
         label="Tabla de clientes",
         columns=["CUIT", "Empresa", "Colaboradores", "Imp. Neto", "Bonif. %", "IVA %", "Cond. IVA", "Tipo Cbte", "Últ. Ajuste"],
@@ -169,29 +187,44 @@ def generar_facturas(app: FacturadorApp, log) -> None:
                 f"${c.imp_neto:,.2f}",
                 f"{c.bonificacion_pct:.1f}%",
                 f"{c.iva:.1f}%",
-                c.iva_cond.name,
-                c.cbte_tipo.name,
+                c.iva_cond.name.replace("_", " "),
+                c.cbte_tipo.name.replace("FACTURA_", ""),
                 str(c.last_adjustment),
             )
             for c in clientes
         ],
+        sub_columns=["Detalle", "Colaboradores", "Imp. Neto", "Bonif. %"],
         sub_rows=[
             [
                 (
                     item.detalle or "-",
                     str(item.colaboradores),
                     f"${item.imp_neto:,.2f}",
-                    f"{item.bonificacion_pct:.1f}%",
+                    f"{c.bonificacion_pct:.1f}%",
                 )
                 for item in c.items
             ] if len(c.items) > 1 else []
             for c in clientes
         ],
-        sub_columns=["Detalle", "Colaboradores", "Imp. Neto", "Bonif. %"],
     )
-    if not app.ask_sync("¿Continuar con la facturación?"):
-        return
-    return
+
+    # Necesitamos agrupar por tipo de comprobante a realizar (factura A la mayoria pero pueden haber facturas B). 
+    # Cada numero de comprobante esta asociado a un punto de venta y un tipo de factura, por lo que podrian haberse
+    # hecho 900 comprobantes de tipo A en el punto de venta 2 pero solo 4 comprobantes de tipo B en el mismo punto de venta
+    cbtes: set[CbteTipo] = set()
+    cuits_receptores: set[str] = set()
+    for cliente in clientes:
+        cbtes.add(cliente.cbte_tipo)
+        assert not cliente.cuit in cuits_receptores, f"cuit repetido: {cliente}"
+        cuits_receptores.add(cliente.cuit)
+
+    proximo_cbt_nros: dict[CbteTipo, int] = {}
+    for cbte in cbtes:
+        log.debug(f"Consultando el ultimo comprobante autorizado (pto_vta={pto_vta.nro}, cbte_tipo={cbte})")
+        ultimo_cbt = fe.ultimo_cbte_autorizado(emisor.cuit, pto_vta=pto_vta, cbte_tipo=cbte)
+        proximo_cbt_nro = ultimo_cbt.cbte_nro + 1
+        proximo_cbt_nros[cbte] = proximo_cbt_nro
+        log.debug(f"Ultimo comprobante: {ultimo_cbt.cbte_nro} -> proximo: {proximo_cbt_nro}")
 
     log.debug("Solicitando ticket de acceso para Padron")
     ta_padron = auth.get_ticket_access(service=PADRON_SERVICE_ID)
@@ -201,67 +234,94 @@ def generar_facturas(app: FacturadorApp, log) -> None:
 
     if mode == Mode.HOMOLOGACION:
         log.info("En homologacion se usara un CUIT ficticio automaticamente")
-        receptor = p.get_persona(emisor.cuit, "27015942210")
+        # Mockeamos los datos para tener un aproximado de como se veria la factura
+        random_persona = p.get_persona(emisor.cuit, "27015942210")
+        receptores = {c.cuit: PersonaInfo(
+            cuit = c.cuit,
+            razon_social = c.descripcion,
+            domicilio = random_persona.domicilio,
+            condicion_iva = c.iva_cond,
+        ) for c in clientes}
+        log.info(f"Se generaron {len(receptores)} receptores ficticios")
     else:
-        log.info(f"Consultando datos del receptor (CUIT: {receptor_cuit})")
-        receptor = p.get_persona(emisor.cuit, receptor_cuit)
-        log.info(f"Receptor obtenido: {receptor.razon_social}")
-
-    receptor.condicion_iva = IVACondicion.CONSUMIDOR_FINAL
+        log.info(f"Consultando datos de {len(cuits_receptores)} receptores")
+        receptores = p.get_personas(emisor.cuit, list(cuits_receptores))
+        log.info(f"Receptores obtenidos {len(receptores)}")
 
     today = date.today()
+    solicitudes: list[SolicitudFactura] = []
 
-    req = SolicitudFactura(
-        pto_vta = pto_vta,
-        cbte_tipo = cbte_tipo,
-        cbte_nro = proximo_cbt_nro,
-        receptor_cuit = receptor_cuit,
-        imp_neto = imp_neto,
-        iva = iva,
-        receptor_iva_cond = receptor.condicion_iva,
-        fecha = today,
-        # TODO las siguientes fields hay que trabajarlas un poco mas
-        serv_desde = today.replace(day=1),
-        serv_hasta = today,
-        vto_pago = today,
+    # Se acomodan las condiciones ante el iva. Por ejemplo, a un monotributista le va a salir que la 
+    # condicion ante el iva es "MONOTRIBUTISTA" pero si le hacemos factura B tenemos que usar "CONSUMIDOR_FINAL".
+    # Ademas se hacen chequeos de consistencia antes de presentar la tabla definitiva de clientes a facturar
+    for cliente in clientes:
+        assert cliente.cuit in receptores, f"error de consistencia: {cliente}"
+        receptor = receptores[cliente.cuit]
+
+        # Rompemos en estos casos por que si (hasta no tener un cliente con estas condiciones no vamos a manejar esto ya que no esta probado)
+        assert cliente.iva_cond not in [IVACondicion.CONSUMIDOR_FINAL, IVACondicion.MONOTRIBUTISTA], f"cliente no soportado: {cliente}"
+        assert receptor.condicion_iva not in [IVACondicion.CONSUMIDOR_FINAL, IVACondicion.MONOTRIBUTISTA], f"receptor no soportado: {receptor}"
+
+        if cliente.iva_cond == IVACondicion.RESPONSABLE_INSCRIPTO:
+            assert cliente.iva == 21.0, f"error de consistencia: {cliente}"
+            assert cliente.cbte_tipo == CbteTipo.FACTURA_A, f"error de consistencia: {cliente}"
+        if cliente.iva_cond == IVACondicion.EXENTO:
+            # No se si esto debe ser asi para todos los casos pero tenemos un caso solo que si
+            assert cliente.iva == 0.0, f"error de consistencia: {cliente}"
+            assert cliente.cbte_tipo == CbteTipo.FACTURA_B, f"error de consistencia: {cliente}"
+
+
+        if cliente.iva_cond != receptor.condicion_iva:
+            # Esto no se si esta bien pero en algunos casos probablemente si. Por ejemplo si tuvieramos un monotributista le podemos hacer factura como
+            # consumidor final y en ese caso, el pdaron nos diria condicion ante el iva 'MONOTRIBUTISTA' pero utilizariamos lo que tenemos anotado en el excel
+            # que es hacer una factura como 'CONSUMIDOR FINAL'
+            log.warning(f"El cliente {cliente.cuit} {receptor.razon_social} tiene condicion ante el IVA {receptor.condicion_iva} pero fue marcado en el excel como {cliente.iva_cond} (se utilizara esta ultima)")
+            receptor.condicion_iva = cliente.iva_cond
+
+        assert cliente.imp_neto == sum(map(lambda i: i.imp_neto, cliente.items)), f"error de consistencia: {cliente}"
+        assert cliente.colaboradores == sum(map(lambda i: i.colaboradores, cliente.items)), f"error de consistencia: {cliente}"
+
+        # TODO soportar bonificacion en el importe
+        solicitudes.append(SolicitudFactura(
+            pto_vta = pto_vta,
+            cbte_tipo = cliente.cbte_tipo,
+            cbte_nro = proximo_cbt_nros[cliente.cbte_tipo],
+            receptor_cuit = cliente.cuit,
+            imp_neto = cliente.imp_neto,
+            iva = cliente.iva,
+            receptor_iva_cond = cliente.iva_cond,
+            fecha = today,
+            serv_desde = today.replace(day=1),
+            serv_hasta = today.replace(day=calendar.monthrange(today.year, today.month)[1]),
+            vto_pago = today + timedelta(days=30),
+        ))
+        proximo_cbt_nros[cliente.cbte_tipo] += 1
+
+    app.show_table_sync(
+        label="Tabla de facturas a realizar",
+        columns=["Cbte Nro", "Tipo Cbte", "CUIT", "Empresa", "Imp. Neto", "IVA %", "Cond. IVA", "Serv. Desde", "Serv. Hasta", "Vto. Pago"],
+        rows=[
+            (
+                str(s.cbte_nro),
+                s.cbte_tipo.name.replace("FACTURA_", ""),
+                s.receptor_cuit,
+                receptores[s.receptor_cuit].razon_social,
+                f"${s.imp_neto:,.2f}",
+                f"{s.iva:.1f}%",
+                s.receptor_iva_cond.name.replace("_", " "),
+                str(s.serv_desde),
+                str(s.serv_hasta),
+                str(s.vto_pago),
+            )
+            for s in solicitudes
+        ],
+        sub_columns=[],
+        sub_rows=[[] for _ in solicitudes],
     )
-    log.info(
-        f"Solicitud:"
-        f"\n  cbte_tipo:        {req.cbte_tipo.name}"
-        f"\n  cbte_nro:         {req.cbte_nro}"
-        f"\n  pto_vta:          {req.pto_vta.nro} ({req.pto_vta.emision_tipo.name})"
-        f"\n  receptor_cuit:    {req.receptor_cuit}"
-        f"\n  receptor_iva:     {req.receptor_iva_cond.name}"
-        f"\n  concepto:         {req.concepto.name}"
-        f"\n  imp_neto:         ${req.imp_neto:.2f}"
-        f"\n  iva:              {req.iva}%"
-        f"\n  fecha:            {req.fecha}"
-        f"\n  serv_desde:       {req.serv_desde}"
-        f"\n  serv_hasta:       {req.serv_hasta}"
-        f"\n  vto_pago:         {req.vto_pago}"
-        "\n"
-    )
-    log.info(
-        f"Emisor:"
-        f"\n  cuit:                    {emisor.cuit}"
-        f"\n  razon_social:            {emisor.razon_social}"
-        f"\n  domicilio:               {emisor.domicilio}"
-        f"\n  condicion_iva:           {emisor.condicion_iva.name}"
-        f"\n  fecha_inicio_actividades:{emisor.fecha_inicio_actividades}"
-        f"\n  ingresos_brutos:         {emisor.ingresos_brutos}"
-        "\n"
-    )
-    log.info(
-        f"Receptor:"
-        f"\n  cuit:          {receptor.cuit}"
-        f"\n  razon_social:  {receptor.razon_social}"
-        f"\n  domicilio:     {receptor.domicilio}"
-        f"\n  condicion_iva: {receptor.condicion_iva.name}"
-        "\n"
-    )
-    if not app.ask_sync(prompt="Continuar [y/N]: ", default=False):
-        log.info("Abortando")
+
+    if not app.ask_sync("¿Continuar con la facturación?"):
         return
+    return
 
     log.info("Solicitando CAE a WSFE")
     cae_result = fe.cae_solicitar(emisor.cuit, [req])[req.cbte_nro]
@@ -292,7 +352,9 @@ def generar_facturas(app: FacturadorApp, log) -> None:
             precio_unitario=req.imp_neto,
             unidad_medida=UnidadMedida.UNIDADES,
             codigo = "1",
-        )]
+        )],
+        cert_path = Path(os.environ["ARCA_CERTIFICATE"]).expanduser(),
+        key_path = Path(os.environ["ARCA_PRIVATE_KEY"]).expanduser(),
     )
     log.info(f"Factura electronica generada exitosamente en {pdf_path}")
 
@@ -313,6 +375,8 @@ def main(app: FacturadorApp) -> None:
             ver_facturas(app, log)
         elif selection == "menu-generar":
             generar_facturas(app, log)
+        elif selection == "menu-validar":
+            validar_pdf(app, log)
         elif selection == "quit":
             app.exit()
             return

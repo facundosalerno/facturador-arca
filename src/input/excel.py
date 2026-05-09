@@ -42,7 +42,7 @@ def read_clientes(path: Path, con_ajuste: bool | None = None) -> List[ClientePlu
     df[GROUPED_COLS] = df[GROUPED_COLS].ffill()
 
     # Eliminar filas vacías al final del sheet (sin CUIT ni después del ffill)
-    df = df.dropna(subset=["cuit"])
+    df = df.dropna(subset=[col for col in COLUMN_MAP.values() if col != "detalle"])
 
     if con_ajuste is not None:
         adjustment_month = date.today() - relativedelta(months=MESES_AJUSTE)
@@ -51,7 +51,7 @@ def read_clientes(path: Path, con_ajuste: bool | None = None) -> List[ClientePlu
         df = df[is_adjustment if con_ajuste else ~is_adjustment]
 
     # Eliminar filas sin datos requeridos por item
-    df = df.dropna(subset=["colaboradores", "imp_neto", "bonificacion_pct"])  # pyright: ignore[reportCallIssue]
+    #df = df.dropna(subset=["colaboradores", "imp_neto", "bonificacion_pct"])  # pyright: ignore[reportCallIssue]
 
     result = []
     for cuit_raw, group in df.groupby("cuit", sort=False):
@@ -60,7 +60,6 @@ def read_clientes(path: Path, con_ajuste: bool | None = None) -> List[ClientePlu
         items = [
             ItemFacturadoPlurals(
                 imp_neto=float(row["imp_neto"]),                                                                   # pyright: ignore[reportArgumentType]
-                bonificacion_pct=float(row["bonificacion_pct"]) * 100,                                             # pyright: ignore[reportArgumentType]
                 colaboradores=int(row["colaboradores"]),                                                           # pyright: ignore[reportArgumentType]
                 detalle=str(row["detalle"]) if pd.notna(row["detalle"]) and str(row["detalle"]) != "-" else None,  # pyright: ignore[reportGeneralTypeIssues]
             )

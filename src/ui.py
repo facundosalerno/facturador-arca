@@ -17,12 +17,11 @@ from src.log import TextualLogHandler
 T = TypeVar("T")
 
 
-MENU_BUTTON_IDS = {"menu-clientes", "menu-facturas", "menu-generar", "quit"}
+MENU_BUTTON_IDS = {"menu-clientes", "menu-facturas", "menu-generar", "menu-validar", "quit"}
 
 
 class FacturadorApp(App):
     TITLE = "Facturador ARCA"
-    BINDINGS = [Binding("escape", "close_table", show=False)]
 
     def __init__(self) -> None:
         super().__init__()
@@ -30,14 +29,12 @@ class FacturadorApp(App):
         self._confirm_future: concurrent.futures.Future[bool] | None = None
         self._input_future: concurrent.futures.Future[str] | None = None
         self._table_close_future: concurrent.futures.Future[None] | None = None
-        self._table_close_callback: Callable | None = None
-        self._table_link_callback: Callable | None = None
         self._menu_future: concurrent.futures.Future[str] | None = None
+        self._table_snapshots: list[tuple] = []
 
     def compose(self) -> ComposeResult:
         yield HomeMenu()
         yield RichLog(highlight=False, markup=False, wrap=False)
-        yield TableView()
         yield ConfirmBar()
         yield InputBar()
 
@@ -76,9 +73,6 @@ class FacturadorApp(App):
     def toggle_log(self, show: bool | None = None) -> None:
         self._toggle(RichLog, show=show)
 
-    def toggle_table(self, show: bool | None = None) -> None:
-        self._toggle(TableView, show=show)
-
     def toggle_confirm_bar(self, show: bool | None = None, **kwargs) -> None:
         self._toggle(ConfirmBar, show=show, **kwargs)
 
@@ -113,38 +107,23 @@ class FacturadorApp(App):
         label: str,
         columns: list[str],
         rows: list[tuple],
-        sub_rows: list[list[tuple]] | None = None,
         sub_columns: list[str] | None = None,
-        on_open: Callable | None = None,
-        on_close: Callable | None = None,
-        on_link: Callable | None = None,
+        sub_rows: list[list[tuple]] | None = None,
         link: bool = True
     ) -> None:
-        # Warn: el uso de callbacks de esta forma implica que no se pueden mostrar dos tablas al mismo tiempo
-        self._table_close_callback = on_close
-        self._table_link_callback = on_link
-        self.call_from_thread(self.query_one(TableView).load, columns, rows, sub_rows, sub_columns)
-        if on_open:
-            self.call_from_thread(on_open)
-        self.call_from_thread(self.toggle_table, show=True)
         self._table_close_future = concurrent.futures.Future()
-        self._table_close_future.result()  # espera ESC
+        modal = TableModal(label, columns, list(rows), list(sub_columns or []), list(sub_rows or []))
+        self.call_from_thread(self.push_screen, modal, lambda _: self._table_close_future.set_result(None))  # pyright: ignore[reportOptionalMemberAccess]
+        self._table_close_future.result()  # espera dismiss del modal
         if link:
-            link_style = Style(bold=True, color="cyan", underline=True, meta={"@click": "app.link_table"})
+            snapshot_id = len(self._table_snapshots)
+            self._table_snapshots.append((label, columns, list(rows), list(sub_columns or []), list(sub_rows or [])))
+            link_style = Style(bold=True, color="cyan", underline=True, meta={"@click": f"app.link_table('{snapshot_id}')"})
             self.call_from_thread(self.query_one(RichLog).write, Text.assemble("  ↗ ", (label, link_style)))
 
-    def action_link_table(self) -> None:
-        self.toggle_table(show=True)
-        if self._table_link_callback:
-            self._table_link_callback()
-
-    def action_close_table(self) -> None:
-        if self.query_one(TableView).display:
-            self.toggle_table(show=False)
-            if self._table_close_callback:
-                self._table_close_callback()
-            if self._table_close_future and not self._table_close_future.done():
-                self._table_close_future.set_result(None)
+    def action_link_table(self, snapshot_id: str) -> None:
+        label, cols, rows, sub_cols, sub_rows = self._table_snapshots[int(snapshot_id)]
+        self.push_screen(TableModal(label, cols, rows, sub_cols, sub_rows))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id in MENU_BUTTON_IDS:
@@ -202,10 +181,15 @@ class ConfirmBar(Widget):
         padding: 1 2;
         display: none;
     }
+    ConfirmBar #prompt-container {
+        height: auto;
+        align: center middle;
+        margin-bottom: 1;
+    }
     ConfirmBar Static {
         height: auto;
-        margin-bottom: 1;
-        text-align: center;
+        width: auto;
+        text-align: left;
     }
     ConfirmBar Horizontal {
         height: auto;
@@ -217,7 +201,8 @@ class ConfirmBar(Widget):
     """
 
     def compose(self) -> ComposeResult:
-        yield Static("", id="confirm-prompt", markup=True)
+        with Horizontal(id="prompt-container"):
+            yield Static("", id="confirm-prompt", markup=True)
         with Horizontal():
             yield Button("Sí", id="yes", variant="success")
             yield Button("No", id="no", variant="error")
@@ -237,98 +222,6 @@ class ConfirmBar(Widget):
         else:
             no_btn.display = False
         self.display = True
-
-
-class TableSubrowView(ModalScreen):
-    BINDINGS = [Binding("escape", "dismiss", show=False)]
-    DEFAULT_CSS = """
-    TableSubrowView {
-        align: center middle;
-    }
-    TableSubrowView > Vertical {
-        width: 80%;
-        height: auto;
-        max-height: 60%;
-        background: $surface;
-        border: thick $primary;
-        padding: 1 2;
-    }
-    TableSubrowView DataTable {
-        height: auto;
-        max-height: 1fr;
-    }
-    """
-
-    def __init__(self, columns: list[str], rows: list[tuple]) -> None:
-        super().__init__()
-        self._columns = columns
-        self._rows = rows
-
-    def compose(self) -> ComposeResult:
-        with Vertical():
-            yield DataTable(zebra_stripes=True)
-
-    def on_mount(self) -> None:
-        table = self.query_one(DataTable)
-        table.add_columns(*self._columns)
-        for row in self._rows:
-            table.add_row(*row)
-
-
-class TableView(Widget):
-    DEFAULT_CSS = """
-    TableView {
-        height: 1fr;
-        display: none;
-    }
-    TableView DataTable {
-        height: 1fr;
-    }
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._sort_col: int | None = None
-        self._sort_reverse: bool = False
-        self._sub_rows_map: dict[str, list[tuple]] = {}
-        self._sub_columns: list[str] = []
-
-    def compose(self) -> ComposeResult:
-        yield DataTable(zebra_stripes=True, cursor_type="row")
-
-    def load(self, columns: list[str], rows: list[tuple], sub_rows: list[list[tuple]] | None = None, sub_columns: list[str] | None = None) -> None:
-        self._sub_rows_map = {}
-        self._sub_columns = sub_columns or []
-        table = self.query_one(DataTable)
-        table.clear(columns=True)
-        table.add_columns(*columns)
-        for i, row in enumerate(rows):
-            key = str(i)
-            table.add_row(*row, key=key)
-            if sub_rows and i < len(sub_rows) and sub_rows[i]:
-                self._sub_rows_map[key] = sub_rows[i]
-
-    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        key = event.row_key.value
-        if key in self._sub_rows_map:
-            self.app.push_screen(TableSubrowView(self._sub_columns, self._sub_rows_map[key]))
-
-    def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
-        col = event.column_index
-        if self._sort_col == col:
-            self._sort_reverse = not self._sort_reverse
-        else:
-            self._sort_col = col
-            self._sort_reverse = False
-
-        def key(value) -> tuple:
-            s = str(value).replace("$", "").replace(",", "").replace("%", "").strip()
-            try:
-                return (0, float(s))
-            except ValueError:
-                return (1, s)
-
-        event.data_table.sort(event.column_key, key=key, reverse=self._sort_reverse)
 
 
 class HomeMenu(Widget):
@@ -366,5 +259,109 @@ class HomeMenu(Widget):
             yield Button("Ver clientes", id="menu-clientes", variant="primary")
             yield Button("Ver facturas", id="menu-facturas", variant="primary")
             yield Button("Generar facturas", id="menu-generar", variant="success")
+            yield Button("Validar PDF", id="menu-validar", variant="warning")
             yield Button("Salir (Ctrl+Q)", id="quit", variant="error")
-            yield Static("Tip: mantené Shift presionado y arrastrá el mouse haciendo click para seleccionar texto", id="menu-tip")
+            yield Static("Tip: mantene Shift presionado y arrastra el mouse haciendo click para seleccionar texto", id="menu-tip")
+
+
+class TableModal(ModalScreen):
+    BINDINGS = [Binding("escape", "dismiss", show=False)]
+    DEFAULT_CSS = """
+    TableModal {
+        align: center middle;
+        background: $background 80%;
+    }
+    TableModal > Vertical {
+        width: 100%;
+        height: 100%;
+        background: $surface;
+        border: thick $primary;
+    }
+    TableModal DataTable {
+        height: 1fr;
+    }
+    """
+
+    def __init__(self, label: str, columns: list[str], rows: list[tuple], sub_columns: list[str], sub_rows: list[list[tuple]]) -> None:
+        super().__init__()
+        self._label = label
+        self._columns = columns
+        self._rows = rows
+        self._sub_columns = sub_columns
+        self._sub_rows = sub_rows
+        self._sub_rows_map: dict[str, list[tuple]] = {}
+        self._sort_col: int | None = None
+        self._sort_reverse: bool = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield DataTable(zebra_stripes=True, cursor_type="row")
+
+    def on_mount(self) -> None:
+        table = self.query_one(DataTable)
+        table.add_columns(*self._columns)
+        if self._sub_rows:
+            assert len(self._rows) == len(self._sub_rows)
+        for i, row in enumerate(self._rows):
+            key = str(i)
+            table.add_row(*row, key=key)
+            if self._sub_rows and self._sub_rows[i]:
+                self._sub_rows_map[key] = self._sub_rows[i]
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        key = event.row_key.value
+        if key in self._sub_rows_map:
+            self.app.push_screen(TableSubrowView(self._sub_columns, self._sub_rows_map[key]))
+
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
+        col = event.column_index
+        if self._sort_col == col:
+            self._sort_reverse = not self._sort_reverse
+        else:
+            self._sort_col = col
+            self._sort_reverse = False
+
+        def key(value) -> tuple:
+            s = str(value).replace("$", "").replace(",", "").replace("%", "").strip()
+            try:
+                return (0, float(s))
+            except ValueError:
+                return (1, s)
+
+        event.data_table.sort(event.column_key, key=key, reverse=self._sort_reverse)
+
+
+class TableSubrowView(ModalScreen):
+    BINDINGS = [Binding("escape", "dismiss", show=False)]
+    DEFAULT_CSS = """
+    TableSubrowView {
+        align: center middle;
+    }
+    TableSubrowView > Vertical {
+        width: 80%;
+        height: auto;
+        max-height: 60%;
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+    }
+    TableSubrowView DataTable {
+        height: auto;
+        max-height: 1fr;
+    }
+    """
+
+    def __init__(self, columns: list[str], rows: list[tuple]) -> None:
+        super().__init__()
+        self._columns = columns
+        self._rows = rows
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield DataTable(zebra_stripes=True)
+
+    def on_mount(self) -> None:
+        table = self.query_one(DataTable)
+        table.add_columns(*self._columns)
+        for row in self._rows:
+            table.add_row(*row)

@@ -27,6 +27,10 @@ from reportlab.platypus import (
     TableStyle,
 )
 
+from pyhanko.pdf_utils.reader import PdfFileReader
+from pyhanko.sign import signers
+from pyhanko.sign.fields import MDPPerm
+
 from src.webservices.padron import PersonaInfo
 from src.webservices.wsfe import CAEResultado, CbteTipo, SolicitudFactura
 
@@ -118,6 +122,25 @@ def _p(text: str, style: ParagraphStyle) -> Paragraph:
     return Paragraph(text, style)
 
 
+def _sign_pdf(pdf_bytes: bytes, cert_path: Path, key_path: Path, output_path: Path) -> None:
+    signer = signers.SimpleSigner.load(
+        cert_file=str(cert_path),
+        key_file=str(key_path),
+    )
+    reader = PdfFileReader(io.BytesIO(pdf_bytes))
+    with open(output_path, "wb") as out:
+        signers.sign_pdf(
+            reader,
+            signature_meta=signers.PdfSignatureMetadata(
+                field_name="Firma",
+                certify=True,
+                mdp_perm=MDPPerm.NO_CHANGES_ALLOWED,
+            ),
+            signer=signer,
+            output=out,
+        )
+
+
 def generate_invoice_pdf(
     *,
     cuit_emisor: str,
@@ -130,15 +153,22 @@ def generate_invoice_pdf(
     items: Optional[list[ItemFactura]],
     condicion_venta: CondicionVenta = CondicionVenta.TRANSFERENCIA_BANCARIA,
     otros_tributos: float = 0.0,
+    cert_path: Optional[Path] = None,
+    key_path: Optional[Path] = None,
 ) -> None:
     margin   = 20 * mm
     usable_w = A4[0] - 2 * margin
 
+    pdf_buf = io.BytesIO()
     doc = SimpleDocTemplate(
-        str(output_path),
+        pdf_buf,
         pagesize=A4,
         leftMargin=margin, rightMargin=margin,
         topMargin=margin,  bottomMargin=margin,
+        title=output_path.stem,
+        author=emisor.razon_social,
+        subject=f"Factura {_LETTER[req.cbte_tipo]} N° {result.cbte_nro:08d}",
+        creator=emisor.razon_social,
     )
 
     def ps(name: str, **kw) -> ParagraphStyle:
@@ -448,3 +478,9 @@ def generate_invoice_pdf(
     ))
 
     doc.build(story)
+
+    pdf_bytes = pdf_buf.getvalue()
+    if cert_path and key_path:
+        _sign_pdf(pdf_bytes, cert_path, key_path, output_path)
+    else:
+        output_path.write_bytes(pdf_bytes)

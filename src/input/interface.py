@@ -19,6 +19,5 @@ class ClientePlurals:
 @dataclass
 class ItemFacturadoPlurals:
     imp_neto: float
-    bonificacion_pct: float
     colaboradores: int
     detalle: str | None = None
