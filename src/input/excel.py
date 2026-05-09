@@ -60,7 +60,7 @@ def read_clientes(path: Path, con_ajuste: bool | None = None) -> List[ClientePlu
         items = [
             ItemFacturadoPlurals(
                 imp_neto=float(row["imp_neto"]),                                                                   # pyright: ignore[reportArgumentType]
-                bonificacion_pct=float(row["bonificacion_pct"]),                                                   # pyright: ignore[reportArgumentType]
+                bonificacion_pct=float(row["bonificacion_pct"]) * 100,                                             # pyright: ignore[reportArgumentType]
                 colaboradores=int(row["colaboradores"]),                                                           # pyright: ignore[reportArgumentType]
                 detalle=str(row["detalle"]) if pd.notna(row["detalle"]) and str(row["detalle"]) != "-" else None,  # pyright: ignore[reportGeneralTypeIssues]
             )
@@ -70,7 +70,7 @@ def read_clientes(path: Path, con_ajuste: bool | None = None) -> List[ClientePlu
         result.append(ClientePlurals(
             cuit=_parse_cuit(cuit_raw),
             descripcion=str(first["descripcion"]),
-            iva=float(first["iva"]),                                            # pyright: ignore[reportArgumentType]
+            iva=float(first["iva"]) * 100,                                      # pyright: ignore[reportArgumentType]
             iva_cond=IVACondicion.from_str(first["iva_cond"]),            # pyright: ignore[reportArgumentType]
             cbte_tipo=CbteTipo.from_str(first["cbte_tipo"]),              # pyright: ignore[reportArgumentType]
             last_adjustment=pd.to_datetime(first["last_adjustment"]).date(),    # pyright: ignore[reportAttributeAccessIssue]
@@ -78,7 +78,7 @@ def read_clientes(path: Path, con_ajuste: bool | None = None) -> List[ClientePlu
             # Agregados de los items
             colaboradores=sum(item.colaboradores for item in items),
             imp_neto=sum(item.imp_neto for item in items),
-            bonificacion_pct=float(first["bonificacion_pct"]),                  # pyright: ignore[reportArgumentType]
+            bonificacion_pct=float(first["bonificacion_pct"]) * 100,            # pyright: ignore[reportArgumentType]
         ))
 
     return result

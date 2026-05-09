@@ -5,3 +5,4 @@ reportlab>=4.0.0
 qrcode[pil]>=7.4.0
 pandas>=2.0.0
 openpyxl>=3.1.0
+textual>=0.80.0

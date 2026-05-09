@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import os
+import threading
 from datetime import date
 from pathlib import Path
-
 from dotenv import load_dotenv
+from logging import Logger
 
 from src.client.session import AfipSession
 from src.const import Mode
-from src.utils import ensure_input, ask
 from src.log import create_logger
 from src.auth.wsaa import Wsaa
 from src.pdf import generate_invoice_pdf, ItemFactura, UnidadMedida
@@ -16,11 +16,75 @@ from src.const import CbteTipo, IVACondicion, EmisionTipo
 from src.webservices.padron import SERVICE_ID as PADRON_SERVICE_ID, Padron, PersonaInfo
 from src.webservices.wsfe import SERVICE_ID as WSFE_SERVICE_ID, Wsfe, SolicitudFactura, PtoVta
 from src.input.excel import read_clientes
+from src.ui import FacturadorApp
 
 
-def main():
-    load_dotenv()
-    log = create_logger(level="DEBUG")
+
+def ver_clientes(app: FacturadorApp, log: Logger) -> None:
+    path = os.environ["EXCEL_CLIENTES"]
+    clientes = read_clientes(Path(path).expanduser())
+    log.info(f"{len(clientes)} clientes leidos del Excel {path}")
+
+    back_to_menu = threading.Event()
+
+    def on_open():
+        app.toggle_log(show=False)
+
+    def on_close():
+        app.toggle_log(show=True)
+        if back_to_menu.is_set():
+            app.toggle_confirm_bar(show=True)
+
+    def on_link():
+        app.toggle_log(show=False)
+        if back_to_menu.is_set():
+            app.toggle_confirm_bar(show=False)
+
+    app.show_table_sync(
+        label="Tabla de clientes",
+        columns=["CUIT", "Empresa", "Colaboradores", "Imp. Neto", "Bonif. %", "IVA %", "Cond. IVA", "Tipo Cbte", "Últ. Ajuste"],
+        rows=[
+            (
+                c.cuit,
+                f"▸ {c.descripcion}" if len(c.items) > 1 else c.descripcion,
+                str(c.colaboradores),
+                f"${c.imp_neto:,.2f}",
+                f"{c.bonificacion_pct:.1f}%",
+                f"{c.iva:.1f}%",
+                c.iva_cond.name.replace("_", " "),
+                c.cbte_tipo.name.replace("FACTURA_", ""),
+                str(c.last_adjustment),
+            )
+            for c in clientes
+        ],
+        sub_columns=["Detalle", "Colaboradores", "Imp. Neto", "Bonif. %"],
+        sub_rows=[
+            [
+                (
+                    item.detalle or "-",
+                    str(item.colaboradores),
+                    f"${item.imp_neto:,.2f}",
+                    f"{item.bonificacion_pct:.1f}%",
+                )
+                for item in c.items
+            ] if len(c.items) > 1 else []
+            for c in clientes
+        ],
+        on_open=on_open,
+        on_close=on_close,
+        on_link=on_link
+    )
+    back_to_menu.set()
+    app.ask_sync("", yes_label="Volver al menu", no_label=None)
+    app.call_from_thread(app.toggle_table, show=False)
+
+
+def ver_facturas(app: FacturadorApp, log: Logger) -> None:
+    log.info("Ver facturas: no implementado")
+    app.ask_sync("", yes_label="Volver al menu", no_label=None)
+
+
+def generar_facturas(app: FacturadorApp, log) -> None:
     mode = Mode(os.environ["ARCA_ENV"])
     cuit = os.environ["ARCA_CUIT"]
 
@@ -53,7 +117,18 @@ def main():
     )
 
     cert = auth.get_certificate_info()
-    log.debug(f"Certificado cargado - subject: {cert.subject} | issuer: {cert.issuer} | vigencia: {cert.not_valid_before.date()} -> {cert.not_valid_after.date()}")
+
+    mode_color = "yellow" if mode == Mode.HOMOLOGACION else "bold red"
+    proceed = app.ask_sync((
+        f"[bold]Ambiente:[/bold] [{mode_color}]{mode.value.upper()}[/]\n\n"
+        f"[bold]Certificado:[/bold]\n"
+        f"  Subject:  {cert.subject}\n"
+        f"  Issuer:   {cert.issuer}\n"
+        f"  Vigencia: {cert.not_valid_before.date()} \u2192 {cert.not_valid_after.date()}"
+    ))
+    if not proceed:
+        app.exit()
+        return
 
     log.debug("Solicitando ticket de acceso para WSFE")
     ta_wsfe = auth.get_ticket_access(service=WSFE_SERVICE_ID)
@@ -64,13 +139,13 @@ def main():
     cbte_tipo = CbteTipo.from_str(os.environ["ARCA_CBTE_TIPO"])
 
     if mode == Mode.HOMOLOGACION:
-        nro = ensure_input(prompt="En homologacion debe seleccionar el punto de venta manualmente: ",  type=int, parser=int)
+        nro = app.input_sync(prompt="En homologacion debe seleccionar el punto de venta manualmente: ", type=int, parser=int)
         pto_vta = PtoVta(nro=nro, emision_tipo=EmisionTipo.CAE, bloqueado="N", fch_baja="NULL")
     else:
         log.info("Consultando puntos de venta habilitados")
         ptos = fe.get_ptos_venta(emisor.cuit)
         log.info(f"Puntos de venta obtenidos: {[pv.nro for pv in ptos]}")
-        nro = ensure_input(prompt="Seleccione un punto de venta: ", type=int, parser=int)
+        nro = app.input_sync(prompt="Seleccione un punto de venta: ", type=int, parser=int)
         pto_vta = next((pv for pv in ptos if pv.nro == nro), None)
         assert pto_vta, "el punto de venta seleccionado no existe"
 
@@ -82,8 +157,40 @@ def main():
     
     log.debug("Leyendo excel de clientes")
     clientes = read_clientes(Path(os.environ["EXCEL_CLIENTES"]).expanduser())
-    for cliente in clientes:
-        log.info(f"{cliente=}")
+    log.info(f"{len(clientes)} clientes leídos del Excel")
+    app.show_table_sync(
+        label="Tabla de clientes",
+        columns=["CUIT", "Empresa", "Colaboradores", "Imp. Neto", "Bonif. %", "IVA %", "Cond. IVA", "Tipo Cbte", "Últ. Ajuste"],
+        rows=[
+            (
+                c.cuit,
+                f"▸ {c.descripcion}" if len(c.items) > 1 else c.descripcion,
+                str(c.colaboradores),
+                f"${c.imp_neto:,.2f}",
+                f"{c.bonificacion_pct:.1f}%",
+                f"{c.iva:.1f}%",
+                c.iva_cond.name,
+                c.cbte_tipo.name,
+                str(c.last_adjustment),
+            )
+            for c in clientes
+        ],
+        sub_rows=[
+            [
+                (
+                    item.detalle or "-",
+                    str(item.colaboradores),
+                    f"${item.imp_neto:,.2f}",
+                    f"{item.bonificacion_pct:.1f}%",
+                )
+                for item in c.items
+            ] if len(c.items) > 1 else []
+            for c in clientes
+        ],
+        sub_columns=["Detalle", "Colaboradores", "Imp. Neto", "Bonif. %"],
+    )
+    if not app.ask_sync("¿Continuar con la facturación?"):
+        return
     return
 
     log.debug("Solicitando ticket de acceso para Padron")
@@ -152,7 +259,7 @@ def main():
         f"\n  condicion_iva: {receptor.condicion_iva.name}"
         "\n"
     )
-    if not ask(prompt="Continuar [y/N]: ", default=False):
+    if not app.ask_sync(prompt="Continuar [y/N]: ", default=False):
         log.info("Abortando")
         return
 
@@ -190,5 +297,28 @@ def main():
     log.info(f"Factura electronica generada exitosamente en {pdf_path}")
 
 
+
+
+
+def main(app: FacturadorApp) -> None:
+    load_dotenv()
+    log = create_logger(level="DEBUG", handler=app.get_log_handler())
+
+    while True:
+        selection = app.wait_for_menu_sync()
+
+        if selection == "menu-clientes":
+            ver_clientes(app, log)
+        elif selection == "menu-facturas":
+            ver_facturas(app, log)
+        elif selection == "menu-generar":
+            generar_facturas(app, log)
+        elif selection == "quit":
+            app.exit()
+            return
+
+
 if __name__ == "__main__":
-    main()
+    app = FacturadorApp()
+    app.set_worker(lambda: main(app))
+    app.run()
