@@ -45,7 +45,7 @@ def _parse_done(value) -> bool:
     return False
 
 
-def read_clientes(path: Path, con_ajuste: bool | None = None, done: bool | None = None) -> List[ClientePlurals]:
+def read_clientes(path: Path, con_ajuste: bool | None = None, done: bool | None = None, cuit: str | None = None) -> List[ClientePlurals]:
     df = pd.read_excel(path, sheet_name=SHEET_NAME)
     df = df.rename(columns=COLUMN_MAP)
 
@@ -54,6 +54,9 @@ def read_clientes(path: Path, con_ajuste: bool | None = None, done: bool | None 
 
     # Eliminar filas vacías al final del sheet (sin CUIT ni después del ffill)
     df = df.dropna(subset=[col for col in COLUMN_MAP.values() if col != "detalle"])
+
+    if cuit is not None:
+        df = df[df["cuit"].map(_parse_cuit) == cuit]
 
     if done is not None:
         is_done = df["done"].map(_parse_done)

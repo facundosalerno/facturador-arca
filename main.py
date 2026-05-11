@@ -9,20 +9,20 @@ from logging import Logger
 
 from src.input.interface import ClientePlurals
 from src.client.session import AfipSession
-from src.const import Mode
+from src.const import FacturaResultado, Mode
 from src.log import create_logger
 from src.auth.wsaa import Wsaa
 from src.pdf import generate_invoice_pdf, ItemFactura, UnidadMedida
 from src.const import CbteTipo, IVACondicion, EmisionTipo
 from src.webservices.padron import SERVICE_ID as PADRON_SERVICE_ID, Padron, PersonaInfo
-from src.webservices.wsfe import SERVICE_ID as WSFE_SERVICE_ID, Wsfe, SolicitudFactura, PtoVta
+from src.webservices.wsfe import SERVICE_ID as WSFE_SERVICE_ID, Wsfe, SolicitudFactura, PtoVta, CAEResultado
 from src.input.excel import read_clientes
 from src.ui import FacturadorApp
 from src.utils import format_exception
 
 
 
-def leer_clientes(app: FacturadorApp, log: Logger) -> list[ClientePlurals]:
+def leer_clientes(app: FacturadorApp, log: Logger, call_from_menu: bool = True) -> list[ClientePlurals]:
     log.debug("Leyendo excel de clientes")
     path = os.environ["EXCEL_CLIENTES"]
 
@@ -108,6 +108,8 @@ def leer_clientes(app: FacturadorApp, log: Logger) -> list[ClientePlurals]:
             elif con_ajuste == False:
                 con_ajuste = None
                 con_ajuste_label = "[strike]Con ajuste[/strike]"
+    if call_from_menu:
+        app.ask_sync("", yes_label="Volver al menu", no_label=None)
     return clientes
 
 
@@ -145,8 +147,186 @@ def validar_pdf(app: FacturadorApp, log: Logger) -> None:
 
 
 def ver_facturas(app: FacturadorApp, log: Logger) -> None:
-    log.info("Ver facturas: no implementado")
+    mode = Mode(os.environ["ARCA_ENV"])
+    emisor_cuit = os.environ["ARCA_CUIT"]
+
+    session = AfipSession()
+
+    log.info("Iniciando intercambio de claves con WSAA")
+    auth = Wsaa(
+        mode = mode,
+        cert_path = Path(os.environ["ARCA_CERTIFICATE"]).expanduser(),
+        private_key_path = Path(os.environ["ARCA_PRIVATE_KEY"]).expanduser(),
+        cache_path = Path(os.environ["ARCA_CACHE"]).expanduser(),
+        log = log,
+        session = session,
+    )
+
+    log.debug("Solicitando ticket de acceso para WSFE")
+    ta_wsfe = auth.get_ticket_access(service=WSFE_SERVICE_ID)
+    log.debug(f"Ticket de acceso WSFE obtenido (expira: {ta_wsfe.expiration.isoformat()})")
+
+    fe = Wsfe(mode=mode, ta=ta_wsfe, log=log, session=session)
+
+    log.debug("Solicitando ticket de acceso para Padron")
+    ta_padron = auth.get_ticket_access(service=PADRON_SERVICE_ID)
+    log.debug(f"Ticket de acceso Padron obtenido (expira: {ta_padron.expiration.isoformat()})")
+    
+    p = Padron(mode=mode, ta=ta_padron, log=log, session=session)
+
+    if mode == Mode.HOMOLOGACION:
+        nro = app.input_sync(prompt="En homologacion debe seleccionar el punto de venta manualmente: ", type=int, parser=int)
+        pto_vta = PtoVta(nro=nro, emision_tipo=EmisionTipo.CAE, bloqueado="N", fch_baja="NULL")
+    else:
+        log.info("Consultando puntos de venta habilitados")
+        ptos = fe.get_ptos_venta(emisor_cuit)
+        log.info(f"Puntos de venta obtenidos: {[pv.nro for pv in ptos]}")
+        nro = app.input_sync(prompt="Seleccione un punto de venta: ", type=int, parser=int)
+        pto_vta = next((pv for pv in ptos if pv.nro == nro), None)
+        assert pto_vta, "el punto de venta seleccionado no existe"
+
+    cbte_tipo = app.input_sync(
+        prompt="Tipo de comprobante (A, B o C): ",
+        type=CbteTipo,
+        parser=CbteTipo.from_str,
+    )
+
+    log.debug(f"Consultando ultimo comprobante autorizado (pto_vta={pto_vta.nro}, cbte_tipo={cbte_tipo})")
+    ultimo = fe.ultimo_cbte_autorizado(emisor_cuit, pto_vta=pto_vta, cbte_tipo=cbte_tipo)
+    log.info(f"Ultimo comprobante autorizado: {ultimo.cbte_nro}")
+
+    LIMIT = 50
+    desde_nro = max(1, ultimo.cbte_nro - LIMIT + 1)
+    cbte_nros = list(range(ultimo.cbte_nro, desde_nro - 1, -1))
+
+    log.info(f"Consultando {len(cbte_nros)} comprobante(s)...")
+    comprobantes = fe.consultar_cbtes(emisor_cuit, pto_vta.nro, cbte_tipo, cbte_nros)
+    log.info(f"{len(comprobantes)} comprobante(s) obtenidos")
+
+    while True:
+        result = app.show_table_sync(
+            label = f"Ultimos comprobantes — Pto. Vta. {pto_vta.nro} — Tipo {cbte_tipo.name.replace('FACTURA_', '')}",
+            columns = ["Nro", "Fecha", "CUIT Receptor", "Imp. Neto", "IVA", "Imp. Total", "Resultado", "CAE", "Vto. CAE"],
+            rows = [
+                (
+                    str(c.cbte_nro),
+                    c.cbte_fch.strftime("%d/%m/%Y"),
+                    c.doc_nro,
+                    f"${c.imp_neto:,.2f}",
+                    f"${c.imp_iva:,.2f}",
+                    f"${c.imp_total:,.2f}",
+                    c.resultado,
+                    c.cae,
+                    c.cae_fch_vto,
+                )
+                for c in comprobantes
+            ],
+            sub_columns = [],
+            sub_rows = [[] for _ in comprobantes],
+            buttons = [("Generar PDF", "create-pdf")]
+        )
+
+        if result == None:
+            break
+
+        if result == "create-pdf":
+            cbte_nro = app.input_sync(prompt="Indique numero de comprobante: ", type=int, parser=int)
+            comprobante = fe.consultar_cbte(emisor_cuit, pto_vta.nro, cbte_tipo, cbte_nro)
+            assert comprobante
+            assert comprobante.resultado == FacturaResultado.APROBADO
+            cae_result = CAEResultado(
+                cbte_nro = comprobante.cbte_nro,
+                resultado = comprobante.resultado,
+                cae = comprobante.cae,
+                cae_fch_vto = comprobante.cae_fch_vto,
+                observations = [],
+            )
+
+            clientes = read_clientes(Path(os.environ["EXCEL_CLIENTES"]).expanduser(), cuit=comprobante.doc_nro)
+            assert len(clientes) == 1
+            cliente = clientes[0]
+
+            invoice_path = os.environ["ARCA_FACTURA_PATH"]
+            logo_path = Path(os.environ["ARCA_FACTURA_LOGO"])
+
+            emisor = PersonaInfo(
+                cuit = os.environ["ARCA_CUIT"],
+                razon_social = os.environ["ARCA_RAZON_SOCIAL"],
+                domicilio = os.environ["ARCA_RAZON_DOMICILIO"],
+                condicion_iva = IVACondicion.from_str(os.environ["ARCA_CONDICION_IVA"]),
+                fecha_inicio_actividades = datetime.strptime(os.environ["ARCA_FECHA_INICIO_ACTIVIDADES"], "%d/%m/%Y").date(),
+                ingresos_brutos = os.environ["ARCA_CUIT"]
+            )
+
+            if mode == Mode.HOMOLOGACION:
+                log.info("En homologacion se usara un CUIT ficticio automaticamente")
+                random_persona = p.get_persona(emisor.cuit, "27015942210")
+                receptor = PersonaInfo(
+                    cuit = cliente.cuit,
+                    razon_social = cliente.descripcion,
+                    domicilio = random_persona.domicilio,
+                    condicion_iva = cliente.iva_cond,
+                )
+                log.info(f"Se generaro al cliente receptor ficticio {cliente.cuit}")
+            else:
+                log.info(f"Consultando datos de {cliente.cuit}")
+                receptores = p.get_personas(emisor.cuit, [cliente.cuit])
+                assert len(receptores) == 1
+                receptor = receptores[cliente.cuit]
+                log.info(f"Receptor obtenido {receptor.cuit}")
+
+            assert comprobante.serv_desde and comprobante.serv_hasta and comprobante.vto_pago
+            
+            solicitud = SolicitudFactura(
+                pto_vta = pto_vta,
+                cbte_tipo = cliente.cbte_tipo,
+                cbte_nro = comprobante.cbte_nro,
+                receptor_cuit = cliente.cuit,
+                imp_neto = cliente.imp_neto_efectivo,
+                imp_iva = cliente.imp_iva,
+                imp_total = cliente.imp_total,
+                alicuota_iva_id = cliente.alicuota_iva_id,
+                receptor_iva_cond = cliente.iva_cond,
+                fecha = comprobante.cbte_fch,
+                serv_desde = comprobante.serv_desde,
+                serv_hasta = comprobante.serv_hasta,
+                vto_pago = comprobante.vto_pago,
+            )
+
+            pdf_path = Path(invoice_path.format(
+                cbte_nro = cae_result.cbte_nro,
+                razon_social_receptor = receptor.razon_social.
+                    replace(" ", "_").
+                    replace(".", "").
+                    replace("/", "_"),
+                cuit_receptor = receptor.cuit
+            ))
+            log.debug(f"Generando factura {pdf_path}")
+
+            generate_invoice_pdf(
+                cuit_emisor = emisor.cuit,
+                factura = solicitud,
+                cliente = cliente,
+                result = cae_result,
+                output_path = pdf_path,
+                emisor = emisor,
+                receptor = receptor,
+                logo_path = logo_path,
+                items = [ItemFactura(
+                    descripcion=f"{item.colaboradores} Licencias",
+                    cantidad=1.0,
+                    precio_unitario=item.imp_neto,
+                    unidad_medida=UnidadMedida.UNIDADES,
+                    codigo = str(i),
+                ) for i, item in enumerate(cliente.items)],
+                cert_path = Path(os.environ["ARCA_CERTIFICATE"]).expanduser(),
+                key_path = Path(os.environ["ARCA_PRIVATE_KEY"]).expanduser(),
+            )
+
     app.ask_sync("", yes_label="Volver al menu", no_label=None)
+    return
+
+    
 
 
 def generar_facturas(app: FacturadorApp, log: Logger) -> None:
@@ -215,7 +395,7 @@ def generar_facturas(app: FacturadorApp, log: Logger) -> None:
         pto_vta = next((pv for pv in ptos if pv.nro == nro), None)
         assert pto_vta, "el punto de venta seleccionado no existe"
 
-    clientes = leer_clientes(app, log)
+    clientes = leer_clientes(app, log, call_from_menu=False)
 
     # Necesitamos agrupar por tipo de comprobante a realizar (factura A la mayoria pero pueden haber facturas B). 
     # Cada numero de comprobante esta asociado a un punto de venta y un tipo de factura, por lo que podrian haberse

@@ -4,6 +4,7 @@ WSFEv1 - WebService de Facturacion Electronica
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import groupby
 from logging import Logger
 from dataclasses import dataclass, field
@@ -79,6 +80,29 @@ class Comprobante:
     pto_vta_nro: int
     cbte_tipo: CbteTipo
     cbte_nro: int
+
+@dataclass
+class ComprobanteDetalle:
+    pto_vta_nro: int
+    cbte_tipo: CbteTipo
+    cbte_nro: int
+    cbte_fch: date
+    doc_nro: str
+    imp_total: float
+    imp_neto: float
+    imp_iva: float
+    resultado: FacturaResultado
+    cae: str
+    cae_fch_vto: str
+    serv_desde: date | None
+    serv_hasta: date | None
+    vto_pago: date | None
+
+def _parse_date_opt(raw: str) -> date | None:
+    if not raw or len(raw) != 8:
+        return None
+    return date(int(raw[:4]), int(raw[4:6]), int(raw[6:8]))
+
 
 class Wsfe:
     def __init__(
@@ -266,6 +290,75 @@ class Wsfe:
                     return CAEBtachResultado(resultados=resultados, error=e)
         return CAEBtachResultado(resultados=resultados, error=None)
 
+
+    def consultar_cbte(self, cuit: str, pto_vta_nro: int, cbte_tipo: CbteTipo, cbte_nro: int) -> ComprobanteDetalle | None:
+        """Consulta un comprobante específico. Devuelve None si no existe."""
+        body = (
+            "<ar:FECompConsultar>"
+                "<ar:Auth>"
+                    f"<ar:Token>{self.ta.token}</ar:Token>"
+                    f"<ar:Sign>{self.ta.sign}</ar:Sign>"
+                    f"<ar:Cuit>{cuit}</ar:Cuit>"
+                "</ar:Auth>"
+                "<ar:FeCompConsReq>"
+                    f"<ar:CbteTipo>{cbte_tipo}</ar:CbteTipo>"
+                    f"<ar:PtoVta>{pto_vta_nro}</ar:PtoVta>"
+                    f"<ar:CbteNro>{cbte_nro}</ar:CbteNro>"
+                "</ar:FeCompConsReq>"
+            "</ar:FECompConsultar>"
+        )
+        root = self._post_soap("FECompConsultar", body)
+        result = root.find(".//ar:FECompConsultarResult", NS)
+        if result is None:
+            raise RuntimeError(f"Missing FECompConsultarResult in response:\n{ET.tostring(root, encoding='unicode')}")
+
+        errors = [
+            f"{err.findtext('ar:Code', '', NS)}: {err.findtext('ar:Msg', '', NS)}"
+            for err in result.findall("ar:Errors/ar:Err", NS)
+        ]
+        # Código 10016: el comprobante consultado no existe
+        if any("10016" in e for e in errors):
+            return None
+        if errors:
+            raise RuntimeError("error FECompConsultar: " + "; ".join(errors))
+
+        det = result.find("ar:ResultGet", NS)
+        if det is None:
+            raise RuntimeError("FECompConsultar no devolvio ResultGet")
+
+        cbte_fch = _parse_date_opt(det.findtext("ar:CbteFch", "", NS))
+        assert cbte_fch, "FECompConsultar no devolvio CbteFch"
+
+        return ComprobanteDetalle(
+            pto_vta_nro = int(det.findtext("ar:PtoVta", "0", NS)),
+            cbte_tipo = CbteTipo(int(det.findtext("ar:CbteTipo", "0", NS))),
+            cbte_nro = int(det.findtext("ar:CbteDesde", "0", NS)),
+            cbte_fch = cbte_fch,
+            doc_nro = det.findtext("ar:DocNro", "", NS),
+            imp_total = float(det.findtext("ar:ImpTotal", "0", NS)),
+            imp_neto = float(det.findtext("ar:ImpNeto", "0", NS)),
+            imp_iva = float(det.findtext("ar:ImpIVA", "0", NS)),
+            resultado = FacturaResultado(det.findtext("ar:Resultado", "", NS)),
+            cae = det.findtext("ar:CodAutorizacion", "", NS),
+            cae_fch_vto = det.findtext("ar:FchVto", "", NS),
+            serv_desde = _parse_date_opt(det.findtext("ar:FchServDesde", "", NS)),
+            serv_hasta = _parse_date_opt(det.findtext("ar:FchServHasta", "", NS)),
+            vto_pago = _parse_date_opt(det.findtext("ar:FchVtoPago", "", NS)),
+        )
+
+    def consultar_cbtes(self, cuit: str, pto_vta_nro: int, cbte_tipo: CbteTipo, cbte_nros: list[int], workers: int = 10) -> list[ComprobanteDetalle]:
+        """Consulta múltiples comprobantes en paralelo. Omite los que no existen."""
+        results: list[ComprobanteDetalle] = []
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(self.consultar_cbte, cuit, pto_vta_nro, cbte_tipo, nro): nro
+                for nro in cbte_nros
+            }
+            for future in as_completed(futures):
+                det = future.result()
+                if det is not None:
+                    results.append(det)
+        return sorted(results, key=lambda c: c.cbte_nro, reverse=True)
 
     def ultimo_cbte_autorizado(self, cuit: str, pto_vta: PtoVta, cbte_tipo: CbteTipo) -> Comprobante:
         body = (
