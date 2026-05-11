@@ -5,7 +5,6 @@ WSFEv1 - WebService de Facturacion Electronica
 from __future__ import annotations
 
 from itertools import groupby
-from typing import Any, Dict, List
 from logging import Logger
 from dataclasses import dataclass, field
 from datetime import date
@@ -52,7 +51,9 @@ class SolicitudFactura:
     cbte_nro: int
     receptor_cuit: str
     imp_neto: float
-    iva: float
+    imp_iva: float
+    imp_total: float
+    alicuota_iva_id: AlicuotaIVAId
     receptor_iva_cond: IVACondicion
     concepto: Concepto = Concepto.SERVICIOS
     fecha: date = field(default_factory=date.today)
@@ -60,6 +61,10 @@ class SolicitudFactura:
     serv_hasta: date = field(default_factory=date.today)
     vto_pago: date = field(default_factory=date.today)
 
+@dataclass
+class CAEBtachResultado:
+    resultados: dict[int, CAEResultado]
+    error: Exception | None
 
 @dataclass
 class CAEResultado:
@@ -103,15 +108,15 @@ class Wsfe:
         )
 
 
-    def get_ptos_venta(self, cuit: str) -> List[PtoVta]:
+    def get_ptos_venta(self, cuit: str) -> list[PtoVta]:
         assert self.mode == Mode.PRODUCCION, ""
         body = (
             "<ar:FEParamGetPtosVenta>"
-            "<ar:Auth>"
-            f"<ar:Token>{self.ta.token}</ar:Token>"
-            f"<ar:Sign>{self.ta.sign}</ar:Sign>"
-            f"<ar:Cuit>{cuit}</ar:Cuit>"
-            "</ar:Auth>"
+                "<ar:Auth>"
+                    f"<ar:Token>{self.ta.token}</ar:Token>"
+                    f"<ar:Sign>{self.ta.sign}</ar:Sign>"
+                    f"<ar:Cuit>{cuit}</ar:Cuit>"
+                "</ar:Auth>"
             "</ar:FEParamGetPtosVenta>"
         )
         root = self._post_soap("FEParamGetPtosVenta", body)
@@ -145,39 +150,37 @@ class Wsfe:
 
     def _build_det_request(self, req: SolicitudFactura) -> str:
         fmt = "%Y%m%d"
-        aliciva_id = AlicuotaIVAId.from_pct(req.iva)
-        imp_iva = round(req.imp_neto * req.iva / 100, 2)
-        imp_total = round(req.imp_neto + imp_iva, 2)
         serv_fields = (
             f"<ar:FchServDesde>{req.serv_desde.strftime(fmt)}</ar:FchServDesde>"
             f"<ar:FchServHasta>{req.serv_hasta.strftime(fmt)}</ar:FchServHasta>"
             f"<ar:FchVtoPago>{req.vto_pago.strftime(fmt)}</ar:FchVtoPago>"
         ) if req.concepto in (Concepto.SERVICIOS, Concepto.PRODUCTOS_Y_SERVICIOS) else ""
+
         return (
             "<ar:FECAEDetRequest>"
-            f"<ar:Concepto>{req.concepto}</ar:Concepto>"
-            f"<ar:DocTipo>{DocTipo.CUIT}</ar:DocTipo>"
-            f"<ar:DocNro>{req.receptor_cuit}</ar:DocNro>"
-            f"<ar:CbteDesde>{req.cbte_nro}</ar:CbteDesde>"
-            f"<ar:CbteHasta>{req.cbte_nro}</ar:CbteHasta>"
-            f"<ar:CbteFch>{req.fecha.strftime(fmt)}</ar:CbteFch>"
-            f"<ar:ImpTotal>{imp_total:.2f}</ar:ImpTotal>"
-            "<ar:ImpTotConc>0.00</ar:ImpTotConc>"
-            f"<ar:ImpNeto>{req.imp_neto:.2f}</ar:ImpNeto>"
-            "<ar:ImpOpEx>0.00</ar:ImpOpEx>"
-            f"<ar:ImpIVA>{imp_iva:.2f}</ar:ImpIVA>"
-            "<ar:ImpTrib>0.00</ar:ImpTrib>"
-            f"<ar:CondicionIVAReceptorId>{req.receptor_iva_cond}</ar:CondicionIVAReceptorId>"
-            + serv_fields +
-            "<ar:MonId>PES</ar:MonId>"
-            "<ar:MonCotiz>1</ar:MonCotiz>"
-            "<ar:Iva>"
-            "<ar:AlicIva>"
-            f"<ar:Id>{aliciva_id}</ar:Id>"
-            f"<ar:BaseImp>{req.imp_neto:.2f}</ar:BaseImp>"
-            f"<ar:Importe>{imp_iva:.2f}</ar:Importe>"
-            "</ar:AlicIva>"
-            "</ar:Iva>"
+                f"<ar:Concepto>{req.concepto}</ar:Concepto>"
+                f"<ar:DocTipo>{DocTipo.CUIT}</ar:DocTipo>"
+                f"<ar:DocNro>{req.receptor_cuit}</ar:DocNro>"
+                f"<ar:CbteDesde>{req.cbte_nro}</ar:CbteDesde>"
+                f"<ar:CbteHasta>{req.cbte_nro}</ar:CbteHasta>"
+                f"<ar:CbteFch>{req.fecha.strftime(fmt)}</ar:CbteFch>"
+                f"<ar:ImpTotal>{req.imp_total:.2f}</ar:ImpTotal>"
+                "<ar:ImpTotConc>0.00</ar:ImpTotConc>"
+                f"<ar:ImpNeto>{req.imp_neto:.2f}</ar:ImpNeto>"
+                "<ar:ImpOpEx>0.00</ar:ImpOpEx>"
+                f"<ar:ImpIVA>{req.imp_iva:.2f}</ar:ImpIVA>"
+                "<ar:ImpTrib>0.00</ar:ImpTrib>"
+                f"<ar:CondicionIVAReceptorId>{req.receptor_iva_cond}</ar:CondicionIVAReceptorId>"
+                + serv_fields +
+                "<ar:MonId>PES</ar:MonId>"
+                "<ar:MonCotiz>1</ar:MonCotiz>"
+                "<ar:Iva>"
+                    "<ar:AlicIva>"
+                        f"<ar:Id>{req.alicuota_iva_id}</ar:Id>"
+                        f"<ar:BaseImp>{req.imp_neto:.2f}</ar:BaseImp>"
+                        f"<ar:Importe>{req.imp_iva:.2f}</ar:Importe>"
+                    "</ar:AlicIva>"
+                "</ar:Iva>"
             "</ar:FECAEDetRequest>"
         )
 
@@ -185,21 +188,21 @@ class Wsfe:
         first = reqs[0]
         body = (
             "<ar:FECAESolicitar>"
-            "<ar:Auth>"
-            f"<ar:Token>{self.ta.token}</ar:Token>"
-            f"<ar:Sign>{self.ta.sign}</ar:Sign>"
-            f"<ar:Cuit>{cuit}</ar:Cuit>"
-            "</ar:Auth>"
-            "<ar:FeCAEReq>"
-            "<ar:FeCabReq>"
-            f"<ar:CantReg>{len(reqs)}</ar:CantReg>"
-            f"<ar:PtoVta>{first.pto_vta.nro}</ar:PtoVta>"
-            f"<ar:CbteTipo>{first.cbte_tipo}</ar:CbteTipo>"
-            "</ar:FeCabReq>"
-            "<ar:FeDetReq>"
-            + "".join(self._build_det_request(r) for r in reqs) +
-            "</ar:FeDetReq>"
-            "</ar:FeCAEReq>"
+                "<ar:Auth>"
+                    f"<ar:Token>{self.ta.token}</ar:Token>"
+                    f"<ar:Sign>{self.ta.sign}</ar:Sign>"
+                    f"<ar:Cuit>{cuit}</ar:Cuit>"
+                "</ar:Auth>"
+                "<ar:FeCAEReq>"
+                    "<ar:FeCabReq>"
+                        f"<ar:CantReg>{len(reqs)}</ar:CantReg>"
+                        f"<ar:PtoVta>{first.pto_vta.nro}</ar:PtoVta>"
+                        f"<ar:CbteTipo>{first.cbte_tipo}</ar:CbteTipo>"
+                    "</ar:FeCabReq>"
+                    "<ar:FeDetReq>"
+                    + "".join(self._build_det_request(r) for r in reqs) +
+                    "</ar:FeDetReq>"
+                "</ar:FeCAEReq>"
             "</ar:FECAESolicitar>"
         )
         root = self._post_soap("FECAESolicitar", body)
@@ -235,8 +238,18 @@ class Wsfe:
             ))
         return results
 
-    def cae_solicitar(self, cuit: str, reqs: List[SolicitudFactura]) -> Dict[int, CAEResultado]:
-        results: Dict[int, CAEResultado] = {}
+    def cae_solicitar(self, cuit: str, reqs: list[SolicitudFactura]) -> CAEBtachResultado:
+        seen: set[tuple[int, int, int]] = set()
+        duplicates: list[tuple[int, int, int]] = []
+        for r in reqs:
+            key = (r.pto_vta.nro, r.cbte_tipo, r.cbte_nro)
+            if key in seen:
+                duplicates.append(key)
+            seen.add(key)
+        if duplicates:
+            return CAEBtachResultado(resultados={}, error=ValueError(f"cbte_nro duplicado en la solicitud: {duplicates}"))
+
+        resultados: dict[int, CAEResultado] = {}
         key_fn = lambda r: (r.pto_vta.nro, r.cbte_tipo)
         # El header de cada batch requiere un único pto_vta y cbte_tipo, por lo que hay que
         # agrupar por esos campos antes de batchar. El sort previo es necesario porque
@@ -245,25 +258,25 @@ class Wsfe:
             group_list = list(group)
             for i in range(0, len(group_list), self.batch_size):
                 chunk = group_list[i:i + self.batch_size]
-                duplicates = [r.cbte_nro for r in chunk if r.cbte_nro in results]
-                if duplicates:
-                    raise ValueError(f"cbte_nro duplicado en la solicitud: {duplicates}")
                 self.log.debug(f"Enviando batch de {len(chunk)} comprobante(s) (pto_vta={chunk[0].pto_vta.nro}, cbte_tipo={chunk[0].cbte_tipo})")
-                for resultado in self._cae_solicitar_batch(cuit, chunk):
-                    results[resultado.cbte_nro] = resultado
-        return results
+                try:
+                    for resultado in self._cae_solicitar_batch(cuit, chunk):
+                        resultados[resultado.cbte_nro] = resultado
+                except Exception as e:
+                    return CAEBtachResultado(resultados=resultados, error=e)
+        return CAEBtachResultado(resultados=resultados, error=None)
 
 
     def ultimo_cbte_autorizado(self, cuit: str, pto_vta: PtoVta, cbte_tipo: CbteTipo) -> Comprobante:
         body = (
             "<ar:FECompUltimoAutorizado>"
-            "<ar:Auth>"
-            f"<ar:Token>{self.ta.token}</ar:Token>"
-            f"<ar:Sign>{self.ta.sign}</ar:Sign>"
-            f"<ar:Cuit>{cuit}</ar:Cuit>"
-            "</ar:Auth>"
-            f"<ar:PtoVta>{pto_vta.nro}</ar:PtoVta>"
-            f"<ar:CbteTipo>{cbte_tipo}</ar:CbteTipo>"
+                "<ar:Auth>"
+                    f"<ar:Token>{self.ta.token}</ar:Token>"
+                    f"<ar:Sign>{self.ta.sign}</ar:Sign>"
+                    f"<ar:Cuit>{cuit}</ar:Cuit>"
+                "</ar:Auth>"
+                f"<ar:PtoVta>{pto_vta.nro}</ar:PtoVta>"
+                f"<ar:CbteTipo>{cbte_tipo}</ar:CbteTipo>"
             "</ar:FECompUltimoAutorizado>"
         )
         root = self._post_soap("FECompUltimoAutorizado", body)
@@ -290,9 +303,9 @@ class Wsfe:
         envelope = (
             '<?xml version="1.0" encoding="UTF-8"?>'
             '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
-            'xmlns:ar="http://ar.gov.afip.dif.FEV1/">'
-            "<soapenv:Header/>"
-            f"<soapenv:Body>{body_xml}</soapenv:Body>"
+                'xmlns:ar="http://ar.gov.afip.dif.FEV1/">'
+                "<soapenv:Header/>"
+                f"<soapenv:Body>{body_xml}</soapenv:Body>"
             "</soapenv:Envelope>"
         )
         response = self.session.post(

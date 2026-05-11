@@ -17,6 +17,7 @@ from src.webservices.padron import SERVICE_ID as PADRON_SERVICE_ID, Padron, Pers
 from src.webservices.wsfe import SERVICE_ID as WSFE_SERVICE_ID, Wsfe, SolicitudFactura, PtoVta
 from src.input.excel import read_clientes
 from src.ui import FacturadorApp
+from src.utils import format_exception
 
 
 
@@ -83,8 +84,8 @@ def validar_pdf(app: FacturadorApp, log: Logger) -> None:
                 for i, sig in enumerate(sigs, 1):
                     status = validate_pdf_signature(sig)
                     log.info(f"Firma #{i} — campo: {sig.field_name}")
-                    log.info(f"  Sin modificaciones: {'OK' if status.intact else 'FALLO'}")
-                    log.info(f"  Firma válida:       {'OK' if status.valid else 'FALLO'}")
+                    log.info(f"Sin modificaciones: {'OK' if status.intact else 'FALLO'}")
+                    log.info(f"Firma válida:       {'OK' if status.valid else 'FALLO'}")
                     if status.signing_cert is not None:
                         log.info(f"  Firmante: {status.signing_cert.subject.human_friendly}")
     except Exception as e:
@@ -249,7 +250,7 @@ def generar_facturas(app: FacturadorApp, log: Logger) -> None:
         log.info(f"Receptores obtenidos {len(receptores)}")
 
     today = date.today()
-    solicitudes: list[SolicitudFactura] = []
+    solicitudes: dict[str, SolicitudFactura] = {}
 
     # Se acomodan las condiciones ante el iva. Por ejemplo, a un monotributista le va a salir que la 
     # condicion ante el iva es "MONOTRIBUTISTA" pero si le hacemos factura B tenemos que usar "CONSUMIDOR_FINAL".
@@ -280,26 +281,27 @@ def generar_facturas(app: FacturadorApp, log: Logger) -> None:
 
         assert cliente.imp_neto == sum(map(lambda i: i.imp_neto, cliente.items)), f"error de consistencia: {cliente}"
         assert cliente.colaboradores == sum(map(lambda i: i.colaboradores, cliente.items)), f"error de consistencia: {cliente}"
-
-        # TODO soportar bonificacion en el importe
-        solicitudes.append(SolicitudFactura(
+        assert not cliente.cuit in solicitudes, f"error de consistencia: {cliente}"
+        solicitudes[cliente.cuit] = SolicitudFactura(
             pto_vta = pto_vta,
             cbte_tipo = cliente.cbte_tipo,
-            cbte_nro = proximo_cbt_nros[cliente.cbte_tipo],
+            cbte_nro = proximo_cbt_nros[cliente.cbte_tipo], # Este campo (cbte_nro) se puede pisar
             receptor_cuit = cliente.cuit,
-            imp_neto = cliente.imp_neto,
-            iva = cliente.iva,
+            imp_neto = cliente.imp_neto_efectivo,
+            imp_iva = cliente.imp_iva,
+            imp_total = cliente.imp_total,
+            alicuota_iva_id = cliente.alicuota_iva_id,
             receptor_iva_cond = cliente.iva_cond,
             fecha = today,
             serv_desde = today.replace(day=1),
             serv_hasta = today.replace(day=calendar.monthrange(today.year, today.month)[1]),
             vto_pago = today + timedelta(days=30),
-        ))
+        )
         proximo_cbt_nros[cliente.cbte_tipo] += 1
 
     app.show_table_sync(
         label="Tabla de facturas a realizar",
-        columns=["Cbte Nro", "Tipo Cbte", "CUIT", "Empresa", "Imp. Neto", "IVA %", "Cond. IVA", "Serv. Desde", "Serv. Hasta", "Vto. Pago"],
+        columns=["Cbte Nro", "Tipo Cbte", "CUIT", "Empresa", "Imp. Neto", "IVA", "Imp. Total", "Cond. IVA", "Serv. Desde", "Serv. Hasta", "Vto. Pago"],
         rows=[
             (
                 str(s.cbte_nro),
@@ -307,56 +309,98 @@ def generar_facturas(app: FacturadorApp, log: Logger) -> None:
                 s.receptor_cuit,
                 receptores[s.receptor_cuit].razon_social,
                 f"${s.imp_neto:,.2f}",
-                f"{s.iva:.1f}%",
+                f"${s.imp_iva:,.2f}",
+                f"${s.imp_total:,.2f}",
                 s.receptor_iva_cond.name.replace("_", " "),
                 str(s.serv_desde),
                 str(s.serv_hasta),
                 str(s.vto_pago),
             )
-            for s in solicitudes
+            for s in solicitudes.values()
         ],
         sub_columns=[],
         sub_rows=[[] for _ in solicitudes],
     )
 
-    if not app.ask_sync("¿Continuar con la facturación?"):
+    if not app.ask_sync("Continuar con la facturacion?"):
         return
-    return
 
+
+    # Hacemos facturacion cliente por cliente sin bached para mejor control y siplicidad del codigo (no necesitamos baches)
     log.info("Solicitando CAE a WSFE")
-    cae_result = fe.cae_solicitar(emisor.cuit, [req])[req.cbte_nro]
-    log.info(
-        f"CAE obtenido exitosamente:"
-        f"\n  cbte_nro:     {cae_result.cbte_nro}"
-        f"\n  resultado:    {cae_result.resultado}"
-        f"\n  cae:          {cae_result.cae}"
-        f"\n  cae_fch_vto:  {cae_result.cae_fch_vto}"
-        f"\n  observations: {cae_result.observations}"
-        "\n"
-    )
 
-    pdf_path = Path(os.environ["ARCA_FACTURA_PATH"].format(cbte_nro=cae_result.cbte_nro))
-    log.info(f"Generando PDF de la factura en {pdf_path}")
+    invoice_path = os.environ["ARCA_FACTURA_PATH"]
     logo_path = Path(os.environ["ARCA_FACTURA_LOGO"])
-    generate_invoice_pdf(
-        cuit_emisor = emisor.cuit,
-        req = req,
-        result = cae_result,
-        output_path = pdf_path,
-        emisor = emisor,
-        receptor = receptor,
-        logo_path = logo_path,
-        items = [ItemFactura(
-            descripcion="50 Licencias",
-            cantidad=1.0,
-            precio_unitario=req.imp_neto,
-            unidad_medida=UnidadMedida.UNIDADES,
-            codigo = "1",
-        )],
-        cert_path = Path(os.environ["ARCA_CERTIFICATE"]).expanduser(),
-        key_path = Path(os.environ["ARCA_PRIVATE_KEY"]).expanduser(),
-    )
-    log.info(f"Factura electronica generada exitosamente en {pdf_path}")
+
+    # Cada vez que se skipea un cliente tenemos que anotarlo para decrementar el numero de comprobante
+    skipped_cbt_nros: dict[CbteTipo, int] = {}
+
+    # Cliente: datos del excel
+    for i, cliente in enumerate(clientes):
+        # Receptor: datos del cliente sacados del padron (la mayoria de los datos de aca tienen prioridad sobre los del cliente en caso de estar repetidos, ejemplo razon social o domicilio)
+        assert cliente.cuit in receptores, f"error de consistencia: {cliente}"
+        receptor = receptores[cliente.cuit]
+        
+        # Solicitud: datos de la factura reelevantes para ARCA (hay cosas que a ARCA no le interesan pero que en el pdf debemos poner como por ejemplo los items)
+        assert cliente.cuit in solicitudes, f"error de consistencia: {cliente}"
+        solicitud = solicitudes[cliente.cuit]
+
+        if not cliente.cbte_tipo in skipped_cbt_nros:
+            skipped_cbt_nros[cliente.cbte_tipo] = 0
+
+        log.info(f"Procesando cliente {receptor.cuit} - {receptor.razon_social} ({i+1}/{len(clientes)})")
+
+        proceed: bool = app.ask_sync(f"[bold]Cliente:[/bold] {receptor.cuit} - {receptor.razon_social} - ${solicitud.imp_total:,.2f}", yes_label="Continuar", no_label="Omitir")
+        if not proceed:
+            log.info("Cliente omitido")
+            skipped_cbt_nros[cliente.cbte_tipo] += 1
+            continue
+        
+        # Si se omiten N clientes se debe decrementar en N unidades los numeros de comprobantes de los siguientes
+        solicitud.cbte_nro -= skipped_cbt_nros[cliente.cbte_tipo]
+
+        # Solicitamos la factura solo para este cliente
+        cae_batch_result = fe.cae_solicitar(emisor.cuit, [solicitud])
+
+        if cae_batch_result.error:
+            log.error(f"Error de facturacion para el cliente {cliente.cuit}: {format_exception(cae_batch_result.error)}")
+            continue
+
+        # CAE Result: si ARCA aprobo o no la factura
+        assert solicitud.cbte_nro in cae_batch_result.resultados, f"error de consistencia: {solicitud}"
+        cae_result = cae_batch_result.resultados[solicitud.cbte_nro]
+
+        pdf_path = Path(invoice_path.format(
+            cbte_nro = cae_result.cbte_nro,
+            razon_social_receptor = receptor.razon_social.
+                replace(" ", "_").
+                replace(".", "").
+                replace("/", "_"),
+            cuit_receptor = receptor.cuit
+        ))
+        log.debug(f"Generando factura {pdf_path}")
+        generate_invoice_pdf(
+            cuit_emisor = emisor.cuit,
+            factura = solicitud,
+            cliente = cliente,
+            result = cae_result,
+            output_path = pdf_path,
+            emisor = emisor,
+            receptor = receptor,
+            logo_path = logo_path,
+            items = [ItemFactura(
+                descripcion=f"{item.colaboradores} Licencias",
+                cantidad=1.0,
+                precio_unitario=item.imp_neto,
+                unidad_medida=UnidadMedida.UNIDADES,
+                codigo = str(i),
+            ) for i, item in enumerate(cliente.items)],
+            cert_path = Path(os.environ["ARCA_CERTIFICATE"]).expanduser(),
+            key_path = Path(os.environ["ARCA_PRIVATE_KEY"]).expanduser(),
+        )
+
+    log.info("Facturacion completada")
+    app.ask_sync("", yes_label="Volver al menu", no_label=None)
 
 
 

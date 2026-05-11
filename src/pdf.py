@@ -1,4 +1,6 @@
-"""Generate a PDF invoice (Factura A/B/C) from CAEResultado + Factura."""
+"""
+Generate a PDF invoice (Factura A/B/C)
+"""
 
 from __future__ import annotations
 
@@ -27,12 +29,13 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from pyhanko.pdf_utils.reader import PdfFileReader
+from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 from pyhanko.sign import signers
 from pyhanko.sign.fields import MDPPerm
 
+from src.input.interface import ClientePlurals
 from src.webservices.padron import PersonaInfo
-from src.webservices.wsfe import CAEResultado, CbteTipo, SolicitudFactura
+from src.webservices.wsfe import CAEResultado, SolicitudFactura
 
 NAVY    = colors.HexColor("#1B2440")
 GRAY_BG = colors.HexColor("#F7F8FA")
@@ -40,10 +43,7 @@ GRAY_LN = colors.HexColor("#D0D5DD")
 TEXT    = colors.HexColor("#101828")
 MUTED   = colors.HexColor("#667085")
 
-_LETTER = {CbteTipo.FACTURA_A: "A", CbteTipo.FACTURA_B: "B", CbteTipo.FACTURA_C: "C"}
 
-# Código de comprobante ARCA por tipo
-_CBTE_COD = {CbteTipo.FACTURA_A: "01", CbteTipo.FACTURA_B: "06", CbteTipo.FACTURA_C: "11"}
 
 
 class CopiaComprobante(str, Enum):
@@ -83,20 +83,20 @@ class ItemFactura:
         return round(self.cantidad * self.precio_unitario * (1 - self.bonificacion_pct / 100), 2)
 
 
-def _qr_image(cuit: str, req: SolicitudFactura, result: CAEResultado, size_mm: float) -> Image:
+def _qr_image(cuit: str, factura: SolicitudFactura, result: CAEResultado, size_mm: float) -> Image:
     """Generate ARCA QR code image per spec: https://www.arca.gob.ar/fe/qr/?p=<base64-json>."""
     payload = {
         "ver": 1,
-        "fecha": req.fecha.strftime("%Y-%m-%d"),
+        "fecha": factura.fecha.strftime("%Y-%m-%d"),
         "cuit": int(cuit.replace("-", "")),
-        "ptoVta": req.pto_vta.nro,
-        "tipoCmp": int(req.cbte_tipo),
+        "ptoVta": factura.pto_vta.nro,
+        "tipoCmp": int(factura.cbte_tipo),
         "nroCmp": result.cbte_nro,
-        "importe": round(req.imp_neto * (1 + req.iva / 100), 2),
+        "importe": factura.imp_total,
         "moneda": "PES",
         "ctz": 1,
         "tipoDocRec": 80,
-        "nroDocRec": int(req.receptor_cuit.replace("-", "")),
+        "nroDocRec": int(factura.receptor_cuit.replace("-", "")),
         "tipoCodAut": "E",
         "codAut": int(result.cae),
     }
@@ -127,14 +127,15 @@ def _sign_pdf(pdf_bytes: bytes, cert_path: Path, key_path: Path, output_path: Pa
         cert_file=str(cert_path),
         key_file=str(key_path),
     )
-    reader = PdfFileReader(io.BytesIO(pdf_bytes))
+    assert signer is not None
+    writer = IncrementalPdfFileWriter(io.BytesIO(pdf_bytes))
     with open(output_path, "wb") as out:
         signers.sign_pdf(
-            reader,
+            writer,
             signature_meta=signers.PdfSignatureMetadata(
                 field_name="Firma",
                 certify=True,
-                mdp_perm=MDPPerm.NO_CHANGES_ALLOWED,
+                docmdp_permissions=MDPPerm.NO_CHANGES,
             ),
             signer=signer,
             output=out,
@@ -144,7 +145,8 @@ def _sign_pdf(pdf_bytes: bytes, cert_path: Path, key_path: Path, output_path: Pa
 def generate_invoice_pdf(
     *,
     cuit_emisor: str,
-    req: SolicitudFactura,
+    factura: SolicitudFactura,
+    cliente: ClientePlurals,
     result: CAEResultado,
     output_path: Path,
     emisor: PersonaInfo,
@@ -167,26 +169,26 @@ def generate_invoice_pdf(
         topMargin=margin,  bottomMargin=margin,
         title=output_path.stem,
         author=emisor.razon_social,
-        subject=f"Factura {_LETTER[req.cbte_tipo]} N° {result.cbte_nro:08d}",
+        subject=f"Factura {factura.cbte_tipo.name[-1]} N° {result.cbte_nro:08d}",
         creator=emisor.razon_social,
     )
 
     def ps(name: str, **kw) -> ParagraphStyle:
         return ParagraphStyle(name, **kw)
 
-    letter    = _LETTER[req.cbte_tipo]
-    cbte_cod  = _CBTE_COD[req.cbte_tipo]
-    fecha     = req.fecha.strftime("%d/%m/%Y")
+    letter    = factura.cbte_tipo.name[-1]
+    cbte_cod  = f"{factura.cbte_tipo.value:02d}"
+    fecha     = factura.fecha.strftime("%d/%m/%Y")
     cae_vto   = _fmt_date(result.cae_fch_vto)
-    imp_iva   = round(req.imp_neto * req.iva / 100, 2)
-    imp_total = round(req.imp_neto + imp_iva + otros_tributos, 2)
+    imp_iva   = factura.imp_iva
+    imp_total = round(factura.imp_total + otros_tributos, 2)
 
     # Si no se pasan items, construir uno desde imp_neto
     if not items:
         items = [ItemFactura(
             descripcion="Servicios profesionales",
             cantidad=1.0,
-            precio_unitario=req.imp_neto,
+            precio_unitario=factura.imp_neto,
             unidad_medida=UnidadMedida.UNIDADES,
         )]
 
@@ -259,9 +261,9 @@ def generate_invoice_pdf(
     val_b = ps("val_b", fontSize=9, fontName="Helvetica-Bold", textColor=TEXT, leading=12)
     lbl_b = ps("lbl_b", fontSize=7, fontName="Helvetica-Bold", textColor=MUTED, leading=10)
 
-    periodo_desde = req.serv_desde.strftime("%d/%m/%Y")
-    periodo_hasta = req.serv_hasta.strftime("%d/%m/%Y")
-    vto_pago_str  = req.vto_pago.strftime("%d/%m/%Y")
+    periodo_desde = factura.serv_desde.strftime("%d/%m/%Y")
+    periodo_hasta = factura.serv_hasta.strftime("%d/%m/%Y")
+    vto_pago_str  = factura.vto_pago.strftime("%d/%m/%Y")
 
     story.append(Table(
         [[
@@ -287,7 +289,7 @@ def generate_invoice_pdf(
     # ── Meta + Receptor ───────────────────────────────────────────────────────
     meta = Table(
         [
-            [_p("Punto de Venta", lbl), _p(f"{req.pto_vta.nro:05d}", val)],
+            [_p("Punto de Venta", lbl), _p(f"{factura.pto_vta.nro:05d}", val)],
             [_p("Comp. Nro.",     lbl), _p(f"{result.cbte_nro:08d}", val_b)],
             [_p("Fecha de Emisión", lbl), _p(fecha,     val)],
             [_p("C.A.E. N°",           lbl), _p(result.cae,  val)],
@@ -306,8 +308,8 @@ def generate_invoice_pdf(
         [_p("RECEPTOR", ps("r_hdr", fontSize=7, fontName="Helvetica-Bold", textColor=MUTED))],
     ]
     receptor_rows.append([_p(receptor.razon_social, val_b)])
-    iva_label = req.receptor_iva_cond.name.replace("_", " ").title()
-    receptor_rows.append([_p(f"CUIT {req.receptor_cuit} · {iva_label}", val_b if not receptor else val)])
+    iva_label = factura.receptor_iva_cond.name.replace("_", " ").title()
+    receptor_rows.append([_p(f"CUIT {factura.receptor_cuit} · {iva_label}", val_b if not receptor else val)])
     receptor_rows.append([_p(receptor.domicilio, val)])
     receptor_rows.append([_p(f"Condición de venta: {condicion_venta.value}", val)])
 
@@ -367,7 +369,7 @@ def generate_invoice_pdf(
     ]
     item_rows = [header_row]
     for item in items:
-        sub_c_iva = round(item.subtotal * (1 + req.iva / 100), 2)
+        sub_c_iva = round(item.subtotal * (1 + cliente.iva / 100), 2)
         item_rows.append([
             _p(item.codigo,                                td),
             _p(item.descripcion,                           td),
@@ -376,7 +378,7 @@ def generate_invoice_pdf(
             _p(f"$ {item.precio_unitario:,.2f}",           td_r),
             _p(f"{item.bonificacion_pct:.2f}",             td_r),
             _p(f"$ {item.subtotal:,.2f}",                  td_r),
-            _p(f"{req.iva:.0f}%",                  td_c),
+            _p(f"{cliente.iva:.0f}%",                      td_c),
             _p(f"$ {sub_c_iva:,.2f}",                      td_r),
         ])
 
@@ -404,7 +406,7 @@ def generate_invoice_pdf(
     iva_rates = [27.0, 21.0, 10.5, 5.0, 2.5, 0.0]
     iva_rows = []
     for rate in iva_rates:
-        amount = round(req.imp_neto * rate / 100, 2) if rate == req.iva else 0.0
+        amount = factura.imp_iva if rate == cliente.iva else 0.0
         if amount <= 0:
             continue
         iva_rows.append([
@@ -414,7 +416,7 @@ def generate_invoice_pdf(
 
     tot_col = 52 * mm
     totals_data = [
-        [_p("Importe Neto Gravado:", tot_l), _p(f"$ {req.imp_neto:,.2f}", tot_v)],
+        [_p("Importe Neto Gravado:", tot_l), _p(f"$ {factura.imp_neto:,.2f}", tot_v)],
         *iva_rows,
         [_p("Importe Otros Tributos:", tot_l), _p(f"$ {otros_tributos:,.2f}", tot_v)],
         [_p("Importe Total:",          tot_bl), _p(f"$ {imp_total:,.2f}",    tot_bv)],
@@ -451,7 +453,7 @@ def generate_invoice_pdf(
     footer_s   = ps("footer",   fontSize=7, textColor=MUTED, alignment=TA_CENTER, leading=10)
     footer_b   = ps("footer_b", fontSize=7, fontName="Helvetica-Bold", textColor=NAVY,
                     alignment=TA_CENTER, leading=10)
-    qr_img = _qr_image(cuit_emisor, req, result, size_mm=36)
+    qr_img = _qr_image(cuit_emisor, factura, result, size_mm=36)
     story.append(Table(
         [[qr_img, Table(
             [

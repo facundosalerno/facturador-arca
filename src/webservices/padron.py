@@ -50,16 +50,16 @@ class Padron:
         envelope = (
             '<?xml version="1.0" encoding="UTF-8"?>'
             '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
-            'xmlns:a5="http://a5.soap.ws.server.puc.sr/">'
-            "<soapenv:Header/>"
-            "<soapenv:Body>"
-            "<a5:getPersona_v2>"
-            f"<token>{self.ta.token}</token>"
-            f"<sign>{self.ta.sign}</sign>"
-            f"<cuitRepresentada>{cuit_representada}</cuitRepresentada>"
-            f"<idPersona>{cuit_consulta}</idPersona>"
-            "</a5:getPersona_v2>"
-            "</soapenv:Body>"
+                'xmlns:a5="http://a5.soap.ws.server.puc.sr/">'
+                "<soapenv:Header/>"
+                "<soapenv:Body>"
+                    "<a5:getPersona_v2>"
+                        f"<token>{self.ta.token}</token>"
+                        f"<sign>{self.ta.sign}</sign>"
+                        f"<cuitRepresentada>{cuit_representada}</cuitRepresentada>"
+                        f"<idPersona>{cuit_consulta}</idPersona>"
+                    "</a5:getPersona_v2>"
+                "</soapenv:Body>"
             "</soapenv:Envelope>"
         )
         resp = self.session.post(
@@ -103,16 +103,16 @@ class Padron:
         envelope = (
             '<?xml version="1.0" encoding="UTF-8"?>'
             '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
-            'xmlns:a5="http://a5.soap.ws.server.puc.sr/">'
-            "<soapenv:Header/>"
-            "<soapenv:Body>"
-            "<a5:getPersonaList_v2>"
-            f"<token>{self.ta.token}</token>"
-            f"<sign>{self.ta.sign}</sign>"
-            f"<cuitRepresentada>{cuit_representada}</cuitRepresentada>"
-            f"{ids_xml}"
-            "</a5:getPersonaList_v2>"
-            "</soapenv:Body>"
+                'xmlns:a5="http://a5.soap.ws.server.puc.sr/">'
+                "<soapenv:Header/>"
+                "<soapenv:Body>"
+                    "<a5:getPersonaList_v2>"
+                        f"<token>{self.ta.token}</token>"
+                        f"<sign>{self.ta.sign}</sign>"
+                        f"<cuitRepresentada>{cuit_representada}</cuitRepresentada>"
+                        f"{ids_xml}"
+                    "</a5:getPersonaList_v2>"
+                "</soapenv:Body>"
             "</soapenv:Envelope>"
         )
         resp = self.session.post(

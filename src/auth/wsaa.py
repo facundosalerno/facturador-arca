@@ -116,12 +116,12 @@ class Wsaa:
         xml = (
             '<?xml version="1.0" encoding="UTF-8"?>'
             '<loginTicketRequest version="1.0">'
-            "<header>"
-            f"<uniqueId>{unique_id}</uniqueId>"
-            f"<generationTime>{(now - timedelta(minutes=10)).isoformat(timespec='seconds')}</generationTime>"
-            f"<expirationTime>{(now + timedelta(minutes=10)).isoformat(timespec='seconds')}</expirationTime>"
-            "</header>"
-            f"<service>{service}</service>"
+                "<header>"
+                    f"<uniqueId>{unique_id}</uniqueId>"
+                    f"<generationTime>{(now - timedelta(minutes=10)).isoformat(timespec='seconds')}</generationTime>"
+                    f"<expirationTime>{(now + timedelta(minutes=10)).isoformat(timespec='seconds')}</expirationTime>"
+                "</header>"
+                f"<service>{service}</service>"
             "</loginTicketRequest>"
         )
         return xml.encode("utf-8")
@@ -144,13 +144,13 @@ class Wsaa:
         return (
             '<?xml version="1.0" encoding="UTF-8"?>'
             '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
-            'xmlns:wsaa="http://wsaa.view.sua.dvadac.desein.afip.gov">'
-            "<soapenv:Header/>"
-            "<soapenv:Body>"
-            "<wsaa:loginCms>"
-            f"<wsaa:in0>{cms_b64}</wsaa:in0>"
-            "</wsaa:loginCms>"
-            "</soapenv:Body>"
+                'xmlns:wsaa="http://wsaa.view.sua.dvadac.desein.afip.gov">'
+                "<soapenv:Header/>"
+                "<soapenv:Body>"
+                    "<wsaa:loginCms>"
+                        f"<wsaa:in0>{cms_b64}</wsaa:in0>"
+                    "</wsaa:loginCms>"
+                "</soapenv:Body>"
             "</soapenv:Envelope>"
         )
 

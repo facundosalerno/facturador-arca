@@ -1,7 +1,7 @@
 from datetime import date
 from dataclasses import dataclass
 from typing import List
-from src.const import IVACondicion, CbteTipo
+from src.const import IVACondicion, CbteTipo, AlicuotaIVAId
 
 @dataclass
 class ClientePlurals:
@@ -15,6 +15,22 @@ class ClientePlurals:
     iva_cond: IVACondicion
     cbte_tipo: CbteTipo
     last_adjustment: date
+
+    @property
+    def imp_neto_efectivo(self) -> float:
+        return round(self.imp_neto * (1 - self.bonificacion_pct / 100), 2)
+
+    @property
+    def imp_iva(self) -> float:
+        return round(self.imp_neto_efectivo * self.iva / 100, 2)
+
+    @property
+    def imp_total(self) -> float:
+        return round(self.imp_neto_efectivo + self.imp_iva, 2)
+
+    @property
+    def alicuota_iva_id(self) -> AlicuotaIVAId:
+        return AlicuotaIVAId.from_pct(self.iva)
 
 @dataclass
 class ItemFacturadoPlurals:
