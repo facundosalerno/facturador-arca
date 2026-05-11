@@ -7,6 +7,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from logging import Logger
 
+from src.input.interface import ClientePlurals
 from src.client.session import AfipSession
 from src.const import Mode
 from src.log import create_logger
@@ -21,44 +22,93 @@ from src.utils import format_exception
 
 
 
-def ver_clientes(app: FacturadorApp, log: Logger) -> None:
+def leer_clientes(app: FacturadorApp, log: Logger) -> list[ClientePlurals]:
     log.debug("Leyendo excel de clientes")
     path = os.environ["EXCEL_CLIENTES"]
-    clientes = read_clientes(Path(path).expanduser())
-    log.info(f"{len(clientes)} clientes leidos del Excel {path}")
 
-    app.show_table_sync(
-        label="Tabla de clientes",
-        columns=["CUIT", "Empresa", "Colaboradores", "Imp. Neto", "Bonif. %", "IVA %", "Cond. IVA", "Tipo Cbte", "Últ. Ajuste"],
-        rows=[
-            (
-                c.cuit,
-                f"▸ {c.descripcion}" if len(c.items) > 1 else c.descripcion,
-                str(c.colaboradores),
-                f"${c.imp_neto:,.2f}",
-                f"{c.bonificacion_pct:.1f}%",
-                f"{c.iva:.1f}%",
-                c.iva_cond.name.replace("_", " "),
-                c.cbte_tipo.name.replace("FACTURA_", ""),
-                str(c.last_adjustment),
-            )
-            for c in clientes
-        ],
-        sub_columns=["Detalle", "Colaboradores", "Imp. Neto", "Bonif. %"],
-        sub_rows=[
-            [
+    clientes: list[ClientePlurals]  = []
+    con_ajuste: bool | None = None
+    con_ajuste_label = "[strike]Con ajuste[/strike]"
+    done: bool | None = None
+    done_label = "[strike]Done[/strike]"
+    while True:
+        clientes = read_clientes(Path(path).expanduser(), con_ajuste=con_ajuste, done=done)
+        log.info(f"{len(clientes)} clientes leidos del Excel {path}")
+
+        title = "Tabla de clientes"
+        if done == True:
+            title +=  " facturados"
+        if done == False:
+            title +=  " pendientes"
+
+        if con_ajuste == True:
+            title +=  " con ajuste"
+        if con_ajuste == False:
+            title +=  " sin ajuste"
+
+        result = app.show_table_sync(
+            label = title,
+            columns = ["CUIT", "Empresa", "Colaboradores", "Imp. Neto", "Bonif. %", "IVA %", "Cond. IVA", "Tipo Cbte", "Últ. Ajuste"],
+            rows = [
                 (
-                    item.detalle or "-",
-                    str(item.colaboradores),
-                    f"${item.imp_neto:,.2f}",
+                    c.cuit,
+                    f"▸ {c.descripcion}" if len(c.items) > 1 else c.descripcion,
+                    str(c.colaboradores),
+                    f"${c.imp_neto:,.2f}",
                     f"{c.bonificacion_pct:.1f}%",
+                    f"{c.iva:.1f}%",
+                    c.iva_cond.name.replace("_", " "),
+                    c.cbte_tipo.name.replace("FACTURA_", ""),
+                    str(c.last_adjustment),
                 )
-                for item in c.items
-            ] if len(c.items) > 1 else []
-            for c in clientes
-        ],
-    )
-    app.ask_sync("", yes_label="Volver al menu", no_label=None)
+                for c in clientes
+            ],
+            sub_columns = ["Detalle", "Colaboradores", "Imp. Neto", "Bonif. %"],
+            sub_rows = [
+                [
+                    (
+                        item.detalle or "-",
+                        str(item.colaboradores),
+                        f"${item.imp_neto:,.2f}",
+                        f"{c.bonificacion_pct:.1f}%",
+                    )
+                    for item in c.items
+                ] if len(c.items) > 1 else []
+                for c in clientes
+            ],
+            buttons = [
+                (done_label, "done"),
+                (con_ajuste_label, "ajuste"),
+            ],
+        )
+
+        if not result:
+            break
+
+        if result == "done":
+            # Ciclico entre: None -> True -> False
+            if done is None:
+                done = True
+                done_label = "\\[X] Done"
+            elif done == True:
+                done = False
+                done_label = "\\[ ] Done"
+            elif done == False:
+                done = None
+                done_label = "[strike]Done[/strike]"
+
+        if result == "ajuste":
+            # Ciclico entre: None -> True -> False
+            if con_ajuste is None:
+                con_ajuste = True
+                con_ajuste_label = "\\[X] Con ajuste"
+            elif con_ajuste == True:
+                con_ajuste = False
+                con_ajuste_label = "\\[ ] Con ajuste"
+            elif con_ajuste == False:
+                con_ajuste = None
+                con_ajuste_label = "[strike]Con ajuste[/strike]"
+    return clientes
 
 
 def validar_pdf(app: FacturadorApp, log: Logger) -> None:
@@ -101,7 +151,6 @@ def ver_facturas(app: FacturadorApp, log: Logger) -> None:
 
 def generar_facturas(app: FacturadorApp, log: Logger) -> None:
     mode = Mode(os.environ["ARCA_ENV"])
-    #cuit = os.environ["ARCA_CUIT"]
 
     emisor = PersonaInfo(
         cuit = os.environ["ARCA_CUIT"],
@@ -111,12 +160,6 @@ def generar_facturas(app: FacturadorApp, log: Logger) -> None:
         fecha_inicio_actividades = datetime.strptime(os.environ["ARCA_FECHA_INICIO_ACTIVIDADES"], "%d/%m/%Y").date(),
         ingresos_brutos = os.environ["ARCA_CUIT"]
     )
-
-    # TODO esto deberia manejarse de otra forma
-    #receptor_cuit= os.environ["ARCA_RECEPTOR_CUIT"]
-    #imp_neto = float(os.environ.get("ARCA_IMP_NETO", "100.00"))
-    #iva = float(os.environ.get("ARCA_IVA", "21.0"))
-    #cbte_tipo = CbteTipo.from_str(os.environ["ARCA_CBTE_TIPO"])
 
     log.info(f"Ambiente: {mode}")
 
@@ -172,42 +215,7 @@ def generar_facturas(app: FacturadorApp, log: Logger) -> None:
         pto_vta = next((pv for pv in ptos if pv.nro == nro), None)
         assert pto_vta, "el punto de venta seleccionado no existe"
 
-    log.debug("Leyendo excel de clientes")
-    path = os.environ["EXCEL_CLIENTES"]
-    clientes = read_clientes(Path(os.environ["EXCEL_CLIENTES"]).expanduser())
-    log.info(f"{len(clientes)} clientes leidos del Excel {path}")
-
-    app.show_table_sync(
-        label="Tabla de clientes",
-        columns=["CUIT", "Empresa", "Colaboradores", "Imp. Neto", "Bonif. %", "IVA %", "Cond. IVA", "Tipo Cbte", "Últ. Ajuste"],
-        rows=[
-            (
-                c.cuit,
-                f"▸ {c.descripcion}" if len(c.items) > 1 else c.descripcion,
-                str(c.colaboradores),
-                f"${c.imp_neto:,.2f}",
-                f"{c.bonificacion_pct:.1f}%",
-                f"{c.iva:.1f}%",
-                c.iva_cond.name.replace("_", " "),
-                c.cbte_tipo.name.replace("FACTURA_", ""),
-                str(c.last_adjustment),
-            )
-            for c in clientes
-        ],
-        sub_columns=["Detalle", "Colaboradores", "Imp. Neto", "Bonif. %"],
-        sub_rows=[
-            [
-                (
-                    item.detalle or "-",
-                    str(item.colaboradores),
-                    f"${item.imp_neto:,.2f}",
-                    f"{c.bonificacion_pct:.1f}%",
-                )
-                for item in c.items
-            ] if len(c.items) > 1 else []
-            for c in clientes
-        ],
-    )
+    clientes = leer_clientes(app, log)
 
     # Necesitamos agrupar por tipo de comprobante a realizar (factura A la mayoria pero pueden haber facturas B). 
     # Cada numero de comprobante esta asociado a un punto de venta y un tipo de factura, por lo que podrian haberse
@@ -414,7 +422,7 @@ def main(app: FacturadorApp) -> None:
         selection = app.wait_for_menu_sync()
 
         if selection == "menu-clientes":
-            ver_clientes(app, log)
+            leer_clientes(app, log)
         elif selection == "menu-facturas":
             ver_facturas(app, log)
         elif selection == "menu-generar":

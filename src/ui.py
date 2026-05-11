@@ -28,7 +28,7 @@ class FacturadorApp(App):
         self._worker_fn = None
         self._confirm_future: concurrent.futures.Future[bool] | None = None
         self._input_future: concurrent.futures.Future[str] | None = None
-        self._table_close_future: concurrent.futures.Future[None] | None = None
+        self._table_close_future: concurrent.futures.Future[str | None] | None = None
         self._menu_future: concurrent.futures.Future[str] | None = None
         self._table_snapshots: list[tuple] = []
 
@@ -109,17 +109,19 @@ class FacturadorApp(App):
         rows: list[tuple],
         sub_columns: list[str] | None = None,
         sub_rows: list[list[tuple]] | None = None,
-        link: bool = True
-    ) -> None:
+        link: bool = True,
+        buttons: list[tuple[str, str]] | None = None,
+    ) -> str | None:
         self._table_close_future = concurrent.futures.Future()
-        modal = TableModal(label, columns, list(rows), list(sub_columns or []), list(sub_rows or []))
-        self.call_from_thread(self.push_screen, modal, lambda _: self._table_close_future.set_result(None))  # pyright: ignore[reportOptionalMemberAccess]
-        self._table_close_future.result()  # espera dismiss del modal
+        modal = TableModal(label, columns, list(rows), list(sub_columns or []), list(sub_rows or []), buttons)
+        self.call_from_thread(self.push_screen, modal, lambda result: self._table_close_future.set_result(result))  # pyright: ignore[reportOptionalMemberAccess]
+        result = self._table_close_future.result()  # espera dismiss del modal
         if link:
             snapshot_id = len(self._table_snapshots)
             self._table_snapshots.append((label, columns, list(rows), list(sub_columns or []), list(sub_rows or [])))
             link_style = Style(bold=True, color="cyan", underline=True, meta={"@click": f"app.link_table('{snapshot_id}')"})
             self.call_from_thread(self.query_one(RichLog).write, Text.assemble("  ↗ ", (label, link_style)))
+        return result
 
     def action_link_table(self, snapshot_id: str) -> None:
         label, cols, rows, sub_cols, sub_rows = self._table_snapshots[int(snapshot_id)]
@@ -264,7 +266,7 @@ class HomeMenu(Widget):
             yield Static("Tip: mantene Shift presionado y arrastra el mouse haciendo click para seleccionar texto", id="menu-tip")
 
 
-class TableModal(ModalScreen):
+class TableModal(ModalScreen[str | None]):
     BINDINGS = [Binding("escape", "dismiss", show=False)]
     DEFAULT_CSS = """
     TableModal {
@@ -280,9 +282,31 @@ class TableModal(ModalScreen):
     TableModal DataTable {
         height: 1fr;
     }
+    TableModal #table-header {
+        height: auto;
+        padding: 0 1;
+        border-bottom: solid $primary;
+    }
+    TableModal #table-header Static {
+        width: 1fr;
+        text-style: bold;
+    }
+    TableModal #table-footer {
+        height: auto;
+        align: right middle;
+        padding: 0 1;
+        border-top: solid $primary;
+    }
+    TableModal #table-footer Button {
+        margin-left: 1;
+        min-width: 0;
+        padding: 0 2;
+        height: 1;
+        border: none;
+    }
     """
 
-    def __init__(self, label: str, columns: list[str], rows: list[tuple], sub_columns: list[str], sub_rows: list[list[tuple]]) -> None:
+    def __init__(self, label: str, columns: list[str], rows: list[tuple], sub_columns: list[str], sub_rows: list[list[tuple]], buttons: list[tuple[str, str]] | None = None) -> None:
         super().__init__()
         self._label = label
         self._columns = columns
@@ -292,10 +316,21 @@ class TableModal(ModalScreen):
         self._sub_rows_map: dict[str, list[tuple]] = {}
         self._sort_col: int | None = None
         self._sort_reverse: bool = False
+        self._buttons = buttons or []
 
     def compose(self) -> ComposeResult:
         with Vertical():
+            with Horizontal(id="table-header"):
+                yield Static(f"{self._label} — {len(self._rows)} registros")
             yield DataTable(zebra_stripes=True, cursor_type="row")
+            if self._buttons:
+                with Horizontal(id="table-footer"):
+                    for btn_label, btn_id in self._buttons:
+                        yield Button(btn_label, id=btn_id)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.dismiss(event.button.id)
 
     def on_mount(self) -> None:
         table = self.query_one(DataTable)

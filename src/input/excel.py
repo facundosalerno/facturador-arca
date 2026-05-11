@@ -20,7 +20,8 @@ COLUMN_MAP = {
     "Último ajuste": "last_adjustment",
     "IVA": "iva",
     "Cond IVA": "iva_cond",
-    "Factura": "cbte_tipo"
+    "Factura": "cbte_tipo",
+    "Done": "done",
 }
 
 # Columnas mergeadas en el Excel: tienen valor solo en la primera fila del grupo CUIT
@@ -34,7 +35,17 @@ def _parse_cuit(value) -> str:
     return cuit
 
 
-def read_clientes(path: Path, con_ajuste: bool | None = None) -> List[ClientePlurals]:
+def _parse_done(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "0", "false", "no", "n")
+    return False
+
+
+def read_clientes(path: Path, con_ajuste: bool | None = None, done: bool | None = None) -> List[ClientePlurals]:
     df = pd.read_excel(path, sheet_name=SHEET_NAME)
     df = df.rename(columns=COLUMN_MAP)
 
@@ -44,17 +55,18 @@ def read_clientes(path: Path, con_ajuste: bool | None = None) -> List[ClientePlu
     # Eliminar filas vacías al final del sheet (sin CUIT ni después del ffill)
     df = df.dropna(subset=[col for col in COLUMN_MAP.values() if col != "detalle"])
 
+    if done is not None:
+        is_done = df["done"].map(_parse_done)
+        df = df[is_done if done else ~is_done]
+
     if con_ajuste is not None:
         adjustment_month = date.today() - relativedelta(months=MESES_AJUSTE)
         dates = pd.to_datetime(df["last_adjustment"])
-        is_adjustment = (dates.dt.year == adjustment_month.year) & (dates.dt.month == adjustment_month.month)
+        is_adjustment = (dates.dt.year == adjustment_month.year) & (dates.dt.month == adjustment_month.month)  # pyright: ignore[reportAttributeAccessIssue]
         df = df[is_adjustment if con_ajuste else ~is_adjustment]
 
-    # Eliminar filas sin datos requeridos por item
-    #df = df.dropna(subset=["colaboradores", "imp_neto", "bonificacion_pct"])  # pyright: ignore[reportCallIssue]
-
     result = []
-    for cuit_raw, group in df.groupby("cuit", sort=False):
+    for cuit_raw, group in df.groupby("cuit", sort=False):  # pyright: ignore[reportAttributeAccessIssue]
         first = group.iloc[0]
 
         items = [
