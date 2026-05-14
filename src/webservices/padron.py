@@ -136,19 +136,19 @@ class Padron:
         root = ET.fromstring(resp.text)
 
         by_cuit: dict[str, PersonaInfo] = {}
-        for persona_return in root.findall(".//personaReturn"):
-            err = persona_return.find("errorConstancia")
+        for persona in root.findall(".//personaListReturn/persona"):
+            err = persona.find("errorConstancia")
             if err is not None:
-                cuit = persona_return.findtext("idPersona") or "desconocido"
-                desc = err.findtext("descripcion") or ET.tostring(err, encoding="unicode")
-                raise RuntimeError(f"Padron error para CUIT {cuit}: {desc}")
-            dg = persona_return.find("datosGenerales")
+                cuit = err.findtext("idPersona") or "desconocido"
+                msgs = " | ".join(e.text for e in err.findall("error") if e.text)
+                raise RuntimeError(f"Padron error para CUIT {cuit}: {msgs or ET.tostring(err, encoding='unicode')}")
+            dg = persona.find("datosGenerales")
             if dg is None:
                 raise RuntimeError(
-                    f"Sin datosGenerales en padron:\n{ET.tostring(persona_return, encoding='unicode')}"
+                    f"Sin datosGenerales en padron:\n{ET.tostring(persona, encoding='unicode')}"
                 )
             cuit = dg.findtext("idPersona") or ""
-            by_cuit[cuit] = self._parse_persona_return(persona_return, cuit)
+            by_cuit[cuit] = self._parse_persona_return(persona, cuit)
         return by_cuit
 
     def _parse_persona_return(self, persona_return: ET.Element, cuit: str) -> PersonaInfo:
@@ -160,9 +160,12 @@ class Padron:
             )
 
         tipo = (dg.findtext("tipoPersona") or "").upper()
-        apellido = dg.findtext("apellido") or ""
-        nombre = dg.findtext("nombre") or ""
-        razon_social = f"{nombre} {apellido}".strip() if tipo == "FISICA" else apellido
+        if tipo == "FISICA":
+            nombre = dg.findtext("nombre") or ""
+            apellido = dg.findtext("apellido") or ""
+            razon_social = f"{nombre} {apellido}".strip()
+        else:
+            razon_social = dg.findtext("razonSocial") or dg.findtext("apellido") or ""
 
         drg = persona_return.find("datosRegimenGeneral")
         dmt = persona_return.find("datosMonotributo")
