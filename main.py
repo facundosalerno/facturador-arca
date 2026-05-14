@@ -313,11 +313,11 @@ def ver_facturas(app: FacturadorApp, log: Logger) -> None:
                 receptor = receptor,
                 logo_path = logo_path,
                 items = [ItemFactura(
-                    descripcion=f"{item.colaboradores} Licencias",
+                    descripcion=f"{item.colaboradores} Licencias" + (f" - {item.detalle}" if item.detalle else ""),
                     cantidad=1.0,
                     precio_unitario=item.imp_neto,
                     unidad_medida=UnidadMedida.UNIDADES,
-                    codigo = str(i),
+                    codigo = str(i+1),
                 ) for i, item in enumerate(cliente.items)],
                 cert_path = Path(os.environ["ARCA_CERTIFICATE"]).expanduser(),
                 key_path = Path(os.environ["ARCA_PRIVATE_KEY"]).expanduser(),
@@ -577,7 +577,7 @@ def generar_facturas(app: FacturadorApp, log: Logger) -> None:
             receptor = receptor,
             logo_path = logo_path,
             items = [ItemFactura(
-                descripcion=f"{item.colaboradores} Licencias",
+                descripcion=f"{item.colaboradores} Licencias" + (f" - {item.detalle}" if item.detalle else ""),
                 cantidad=1.0,
                 precio_unitario=item.imp_neto,
                 unidad_medida=UnidadMedida.UNIDADES,

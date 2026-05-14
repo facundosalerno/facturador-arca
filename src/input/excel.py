@@ -53,7 +53,7 @@ def read_clientes(path: Path, con_ajuste: bool | None = None, done: bool | None 
     df[GROUPED_COLS] = df[GROUPED_COLS].ffill()
 
     # Eliminar filas vacías al final del sheet (sin CUIT ni después del ffill)
-    df = df.dropna(subset=[col for col in COLUMN_MAP.values() if col != "detalle"])
+    df = df.dropna(subset=[col for col in COLUMN_MAP.values() if col not in ("detalle", "done")])
 
     if cuit is not None:
         df = df[df["cuit"].map(_parse_cuit) == cuit]
