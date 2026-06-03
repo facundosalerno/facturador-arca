@@ -1,5 +1,6 @@
 cryptography>=42.0.0
 pyhanko>=0.21.0
+pikepdf>=9.0.0
 requests>=2.31.0
 python-dotenv>=1.0.0
 reportlab>=4.0.0

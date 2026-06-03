@@ -22,7 +22,7 @@ from src.utils import format_exception
 
 
 
-def leer_clientes(app: FacturadorApp, log: Logger, call_from_menu: bool = True) -> list[ClientePlurals]:
+def leer_clientes(app: FacturadorApp, log: Logger, call_from_menu: bool = True) -> list[ClientePlurals] | None:
     log.debug("Leyendo excel de clientes")
     path = os.environ["EXCEL_CLIENTES"]
 
@@ -32,7 +32,12 @@ def leer_clientes(app: FacturadorApp, log: Logger, call_from_menu: bool = True) 
     done: bool | None = None
     done_label = "[strike]Done[/strike]"
     while True:
-        clientes = read_clientes(Path(path).expanduser(), con_ajuste=con_ajuste, done=done)
+        try:
+            clientes = read_clientes(Path(path).expanduser(), con_ajuste=con_ajuste, done=done)
+        except Exception as err:
+            log.error(f"fallo al cargar excel de clientes: {err}")
+            app.ask_sync("", yes_label="Volver al menu", no_label=None)
+            return None
         log.info(f"{len(clientes)} clientes leidos del Excel {path}")
 
         title = "Tabla de clientes"
@@ -375,7 +380,6 @@ def generar_facturas(app: FacturadorApp, log: Logger) -> None:
         f"Vigencia: {cert.not_valid_before.date()} \u2192 {cert.not_valid_after.date()}"
     ))
     if not proceed:
-        app.exit()
         return
 
     log.debug("Solicitando ticket de acceso para WSFE")
@@ -396,6 +400,8 @@ def generar_facturas(app: FacturadorApp, log: Logger) -> None:
         assert pto_vta, "el punto de venta seleccionado no existe"
 
     clientes = leer_clientes(app, log, call_from_menu=False)
+    if not clientes:
+        return
 
     # Necesitamos agrupar por tipo de comprobante a realizar (factura A la mayoria pero pueden haber facturas B). 
     # Cada numero de comprobante esta asociado a un punto de venta y un tipo de factura, por lo que podrian haberse

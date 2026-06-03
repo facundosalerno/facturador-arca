@@ -13,6 +13,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+import pikepdf
 import qrcode
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT
@@ -122,24 +123,51 @@ def _p(text: str, style: ParagraphStyle) -> Paragraph:
     return Paragraph(text, style)
 
 
-def _sign_pdf(pdf_bytes: bytes, cert_path: Path, key_path: Path, output_path: Path) -> None:
+def _lock_pdf(pdf_bytes: bytes) -> bytes:
+    """Apply read-only permissions to PDF bytes (printing and text extraction allowed)."""
+    perms = pikepdf.Permissions(
+        accessibility=True,
+        extract=True,
+        modify_annotation=False,
+        modify_assembly=False,
+        modify_form=False,
+        modify_other=False,
+        print_highres=True,
+        print_lowres=True,
+    )
+    buf = io.BytesIO()
+    with pikepdf.open(io.BytesIO(pdf_bytes)) as pdf:
+        pdf.save(
+            buf,
+            encryption=pikepdf.Encryption(
+                user="",
+                owner=os.urandom(16).hex(),
+                allow=perms,
+            ),
+        )
+    return buf.getvalue()
+
+
+def _sign_pdf(pdf_bytes: bytes, cert_path: Path, key_path: Path) -> bytes:
     signer = signers.SimpleSigner.load(
         cert_file=str(cert_path),
         key_file=str(key_path),
     )
     assert signer is not None
     writer = IncrementalPdfFileWriter(io.BytesIO(pdf_bytes))
-    with open(output_path, "wb") as out:
-        signers.sign_pdf(
-            writer,
-            signature_meta=signers.PdfSignatureMetadata(
-                field_name="Firma",
-                certify=True,
-                docmdp_permissions=MDPPerm.NO_CHANGES,
-            ),
-            signer=signer,
-            output=out,
-        )
+    writer.prev.decrypt("")
+    buf = io.BytesIO()
+    signers.sign_pdf(
+        writer,
+        signature_meta=signers.PdfSignatureMetadata(
+            field_name="Firma",
+            certify=True,
+            docmdp_permissions=MDPPerm.NO_CHANGES,
+        ),
+        signer=signer,
+        output=buf,
+    )
+    return buf.getvalue()
 
 
 def generate_invoice_pdf(
@@ -153,10 +181,10 @@ def generate_invoice_pdf(
     receptor: PersonaInfo,
     logo_path: Path,
     items: Optional[list[ItemFactura]],
+    cert_path: Path,
+    key_path: Path,
     condicion_venta: CondicionVenta = CondicionVenta.TRANSFERENCIA_BANCARIA,
     otros_tributos: float = 0.0,
-    cert_path: Optional[Path] = None,
-    key_path: Optional[Path] = None,
 ) -> None:
     margin   = 20 * mm
     usable_w = A4[0] - 2 * margin
@@ -481,8 +509,4 @@ def generate_invoice_pdf(
 
     doc.build(story)
 
-    pdf_bytes = pdf_buf.getvalue()
-    if cert_path and key_path:
-        _sign_pdf(pdf_bytes, cert_path, key_path, output_path)
-    else:
-        output_path.write_bytes(pdf_bytes)
+    output_path.write_bytes(_sign_pdf(_lock_pdf(pdf_buf.getvalue()), cert_path, key_path))
