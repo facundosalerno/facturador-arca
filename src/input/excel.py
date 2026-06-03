@@ -5,11 +5,14 @@ from datetime import date
 from dateutil.relativedelta import relativedelta
 from src.input.interface import ClientePlurals, ItemFacturadoPlurals
 from src.const import IVACondicion, CbteTipo
+from src.webservices.padron import PersonaInfo
 
-SHEET_NAME = "Clientes"
+SHEET_CLIENTES = "Clientes"
+SHEET_PADRON = "Padron"
+
 MESES_AJUSTE = 3
 
-COLUMN_MAP = {
+COLUMN_MAP_CLIENTES = {
     # "columna en el excel": "campo en ClientePlurals / ItemFacturadoPlurals"
     "CUIT": "cuit",
     "EMPRESA": "descripcion",
@@ -25,7 +28,14 @@ COLUMN_MAP = {
 }
 
 # Columnas mergeadas en el Excel: tienen valor solo en la primera fila del grupo CUIT
-GROUPED_COLS = ["cuit", "iva", "iva_cond", "cbte_tipo"]
+GROUPED_COLS_CLIENTES = ["cuit", "iva", "iva_cond", "cbte_tipo"]
+
+COLUMN_MAP_PADRON = {
+    "Razon social": "razon_social",
+    "Cuit": "cuit",
+    "Domicilio": "domicilio",
+    "Condicion IVA": "condicion_iva",
+}
 
 
 def _parse_cuit(value) -> str:
@@ -45,15 +55,35 @@ def _parse_done(value) -> bool:
     return False
 
 
+def _read_padron_local(path: Path) -> dict[str, PersonaInfo]:
+    try:
+        df = pd.read_excel(path, sheet_name=SHEET_PADRON)
+    except Exception:
+        return {}
+    df = df.rename(columns=COLUMN_MAP_PADRON)
+    df = df.dropna(subset=list(COLUMN_MAP_PADRON.values()))
+    result = {}
+    for _, row in df.iterrows():
+        cuit = _parse_cuit(row["cuit"])
+        result[cuit] = PersonaInfo(
+            cuit=cuit,
+            razon_social=str(row["razon_social"]),
+            domicilio=str(row["domicilio"]),
+            condicion_iva=IVACondicion.from_str(row["condicion_iva"]),
+        )
+    return result
+
+
 def read_clientes(path: Path, con_ajuste: bool | None = None, done: bool | None = None, cuit: str | None = None) -> List[ClientePlurals]:
-    df = pd.read_excel(path, sheet_name=SHEET_NAME)
-    df = df.rename(columns=COLUMN_MAP)
+    padron_local = _read_padron_local(path)
+    df = pd.read_excel(path, sheet_name=SHEET_CLIENTES)
+    df = df.rename(columns=COLUMN_MAP_CLIENTES)
 
     # Las columnas mergeadas aparecen como NaN en las sub-filas; las propagamos hacia abajo
-    df[GROUPED_COLS] = df[GROUPED_COLS].ffill()
+    df[GROUPED_COLS_CLIENTES] = df[GROUPED_COLS_CLIENTES].ffill()
 
     # Eliminar filas vacías al final del sheet (sin CUIT ni después del ffill)
-    df = df.dropna(subset=[col for col in COLUMN_MAP.values() if col not in ("detalle", "done")])
+    df = df.dropna(subset=[col for col in COLUMN_MAP_CLIENTES.values() if col not in ("detalle", "done")])
 
     if cuit is not None:
         df = df[df["cuit"].map(_parse_cuit) == cuit]
@@ -81,9 +111,11 @@ def read_clientes(path: Path, con_ajuste: bool | None = None, done: bool | None 
             for _, row in group.iterrows()
         ]
 
+        parsed_cuit = _parse_cuit(cuit_raw)
         result.append(ClientePlurals(
-            cuit=_parse_cuit(cuit_raw),
+            cuit=parsed_cuit,
             descripcion=str(first["descripcion"]),
+            padron=padron_local.get(parsed_cuit),
             iva=float(first["iva"]) * 100,                                      # pyright: ignore[reportArgumentType]
             iva_cond=IVACondicion.from_str(first["iva_cond"]),            # pyright: ignore[reportArgumentType]
             cbte_tipo=CbteTipo.from_str(first["cbte_tipo"]),              # pyright: ignore[reportArgumentType]

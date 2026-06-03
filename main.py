@@ -274,11 +274,15 @@ def ver_facturas(app: FacturadorApp, log: Logger) -> None:
                 )
                 log.info(f"Se generaro al cliente receptor ficticio {cliente.cuit}")
             else:
-                log.info(f"Consultando datos de {cliente.cuit}")
-                receptores = p.get_personas(emisor.cuit, [cliente.cuit])
-                assert len(receptores) == 1
-                receptor = receptores[cliente.cuit]
-                log.info(f"Receptor obtenido {receptor.cuit}")
+                if cliente.padron:
+                    log.warning(f"Usando padron local para cliente {cliente.cuit}")
+                    receptor = cliente.padron
+                else:
+                    log.info(f"Consultando datos de {cliente.cuit}")
+                    receptores = p.get_personas(emisor.cuit, [cliente.cuit])
+                    assert len(receptores) == 1
+                    receptor = receptores[cliente.cuit]
+                    log.info(f"Receptor obtenido {receptor.cuit}")
 
             assert comprobante.serv_desde and comprobante.serv_hasta and comprobante.vto_pago
             
@@ -407,11 +411,17 @@ def generar_facturas(app: FacturadorApp, log: Logger) -> None:
     # Cada numero de comprobante esta asociado a un punto de venta y un tipo de factura, por lo que podrian haberse
     # hecho 900 comprobantes de tipo A en el punto de venta 2 pero solo 4 comprobantes de tipo B en el mismo punto de venta
     cbtes: set[CbteTipo] = set()
-    cuits_receptores: set[str] = set()
+    cuits_to_search_padron: set[str] = set()
+    clients_with_local_padron: dict[str, PersonaInfo] = {}
     for cliente in clientes:
         cbtes.add(cliente.cbte_tipo)
-        assert not cliente.cuit in cuits_receptores, f"cuit repetido: {cliente}"
-        cuits_receptores.add(cliente.cuit)
+        if cliente.padron:
+            log.warning(f"Usando padron local para cliente {cliente.cuit}")
+            assert not cliente.cuit in clients_with_local_padron, f"cuit repetido: {cliente}"
+            clients_with_local_padron[cliente.cuit] = cliente.padron
+            continue
+        assert not cliente.cuit in cuits_to_search_padron, f"cuit repetido: {cliente}"
+        cuits_to_search_padron.add(cliente.cuit)
 
     proximo_cbt_nros: dict[CbteTipo, int] = {}
     for cbte in cbtes:
@@ -439,9 +449,10 @@ def generar_facturas(app: FacturadorApp, log: Logger) -> None:
         ) for c in clientes}
         log.info(f"Se generaron {len(receptores)} receptores ficticios")
     else:
-        log.info(f"Consultando datos de {len(cuits_receptores)} receptores")
-        receptores = p.get_personas(emisor.cuit, list(cuits_receptores))
+        log.info(f"Consultando datos de {len(cuits_to_search_padron)} receptores")
+        receptores = p.get_personas(emisor.cuit, list(cuits_to_search_padron))
         log.info(f"Receptores obtenidos {len(receptores)}")
+        receptores.update(clients_with_local_padron)
 
     today = date.today()
     solicitudes: dict[str, SolicitudFactura] = {}

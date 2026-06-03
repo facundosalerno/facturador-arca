@@ -2,6 +2,7 @@ from datetime import date
 from dataclasses import dataclass
 from typing import List
 from src.const import IVACondicion, CbteTipo, AlicuotaIVAId
+from src.webservices.padron import PersonaInfo
 
 @dataclass
 class ClientePlurals:
@@ -15,6 +16,7 @@ class ClientePlurals:
     iva_cond: IVACondicion
     cbte_tipo: CbteTipo
     last_adjustment: date
+    padron: PersonaInfo | None = None
 
     @property
     def imp_neto_efectivo(self) -> float:
