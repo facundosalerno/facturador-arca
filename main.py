@@ -5,7 +5,7 @@ import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
-from logging import Logger
+from logging import FileHandler, Logger
 
 from src.input.interface import ClientePlurals
 from src.client.session import AfipSession
@@ -569,6 +569,7 @@ def generar_facturas(app: FacturadorApp, log: Logger) -> None:
 
         if cae_batch_result.error:
             log.error(f"Error de facturacion para el cliente {cliente.cuit}: {format_exception(cae_batch_result.error)}")
+            skipped_cbt_nros[cliente.cbte_tipo] += 1
             continue
 
         # CAE Result: si ARCA aprobo o no la factura
@@ -613,7 +614,9 @@ def generar_facturas(app: FacturadorApp, log: Logger) -> None:
 
 def main(app: FacturadorApp) -> None:
     load_dotenv()
+    file_handler = FileHandler("facturador.log", encoding="utf-8")
     log = create_logger(level="DEBUG", handler=app.get_log_handler())
+    log.addHandler(file_handler)
 
     while True:
         selection = app.wait_for_menu_sync()

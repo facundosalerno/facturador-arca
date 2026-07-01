@@ -17,6 +17,7 @@ COLUMN_MAP_CLIENTES = {
     "CUIT": "cuit",
     "EMPRESA": "descripcion",
     "Detalle": "detalle",
+    "Herramientas contratadas": "tools",
     "Colaboradores": "colaboradores",
     "Importe neto": "imp_neto",
     "Descuento %": "bonificacion_pct",
@@ -81,6 +82,10 @@ def read_clientes(path: Path, con_ajuste: bool | None = None, done: bool | None 
 
     # Las columnas mergeadas aparecen como NaN en las sub-filas; las propagamos hacia abajo
     df[GROUPED_COLS_CLIENTES] = df[GROUPED_COLS_CLIENTES].ffill()
+
+    # Convertir "tools" a entero positivo; cualquier otro valor queda NaN y lo descarta el dropna
+    # Es un chequeo para no mostrar clientes que aun no tienen tools contratadas
+    df["tools"] = pd.to_numeric(df["tools"], errors="coerce").where(lambda x: x > 0)
 
     # Eliminar filas vacías al final del sheet (sin CUIT ni después del ffill)
     df = df.dropna(subset=[col for col in COLUMN_MAP_CLIENTES.values() if col not in ("detalle", "done")])

@@ -169,13 +169,18 @@ class Padron:
 
         drg = persona_return.find("datosRegimenGeneral")
         dmt = persona_return.find("datosMonotributo")
+        erg = persona_return.find("errorRegimenGeneral")
 
         if dmt is not None:
             condicion_iva = IVACondicion.MONOTRIBUTISTA
         elif drg is not None:
             condicion_iva = IVACondicion.RESPONSABLE_INSCRIPTO
+        elif erg is not None:
+            msg = erg.findtext("error") or erg.findtext("mensaje") or "sin detalle"
+            raise Exception(f"CUIT {cuit} no tiene régimen activo en AFIP: {msg}")
         else:
-            raise Exception("no se puede determinar la condicion frente al IVA")
+            self.log.warning("No se pudo determinar condicion IVA para CUIT %s", cuit)
+            raise Exception(f"no se puede determinar la condicion frente al IVA para cuit {cuit}")
 
         return PersonaInfo(
             cuit=cuit,
